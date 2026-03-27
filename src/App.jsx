@@ -301,7 +301,8 @@ export default function PoolApp() {
   const saveLog = () => {
     const fc = parseFloat(log.fc);
     if (isNaN(fc) || fc < 0) return;
-    const entry = { id: Date.now(), date: new Date().toISOString(), fc, bathers: log.bathers, notes: log.notes, uvIndex: weather?.uvIndex, tempF: weather?.tempF };
+    const pred  = prediction();
+    const entry = { id: Date.now(), date: new Date().toISOString(), fc, predictedFC: pred?.fc ?? null, bathers: log.bathers, notes: log.notes, uvIndex: weather?.uvIndex, tempF: weather?.tempF };
     const prior = meas.length > 0 ? meas[meas.length - 1] : null;
 
     // Update decay model from prior → this measurement
@@ -765,9 +766,15 @@ export default function PoolApp() {
   // LOG
   // ─────────────────────────────────────────────────────────────────────────
   if (screen === "log") {
-    const minFC = config ? minFCforCYA(config.cya) : 1;
-    const maxFC = config ? maxFCforCYA(config.cya) : 5;
-    const fcVal = parseFloat(log.fc);
+    const minFC  = config ? minFCforCYA(config.cya) : 1;
+    const maxFC  = config ? maxFCforCYA(config.cya) : 5;
+    const fcVal  = parseFloat(log.fc);
+    const pred   = prediction();
+    const predFC = pred?.fc ?? null;
+    const diff   = (predFC !== null && !isNaN(fcVal)) ? Math.round((fcVal - predFC) * 10) / 10 : null;
+    const diffColor = diff === null ? C.muted : diff > 0.3 ? C.good : diff < -0.3 ? C.danger : C.warn;
+    const diffLabel = diff === null ? null : diff > 0 ? `+${diff} above prediction` : diff < 0 ? `${diff} below prediction` : "matches prediction";
+
     return (
       <div style={S.app}>
         <FontLoader />
@@ -779,20 +786,58 @@ export default function PoolApp() {
           <Btn ghost style={{ padding: "6px 12px", fontSize: "10px" }} onClick={() => setScreen("dashboard")}>Cancel</Btn>
         </div>
         <div style={S.content}>
+
+          {/* Prediction comparison — shown when there is a prior prediction */}
+          {predFC !== null && (
+            <Card style={{ borderColor: `${C.accent}33`, padding: "12px 16px" }}>
+              <Cap>MODEL PREDICTED</Cap>
+              <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ ...S.bigNum, fontSize: "36px", color: C.accent }}>{predFC}</div>
+                  <div style={{ fontSize: "9px", color: C.muted, marginTop: "2px" }}>predicted ppm</div>
+                </div>
+                {!isNaN(fcVal) && log.fc !== "" && (
+                  <>
+                    <div style={{ fontSize: "24px", color: C.muted }}>→</div>
+                    <div style={{ textAlign: "center" }}>
+                      <div style={{ ...S.bigNum, fontSize: "36px", color: diffColor }}>{fcVal}</div>
+                      <div style={{ fontSize: "9px", color: C.muted, marginTop: "2px" }}>your reading</div>
+                    </div>
+                    <div style={{ flex: 1, textAlign: "right" }}>
+                      <div style={{ fontSize: "18px", fontWeight: 700, color: diffColor }}>
+                        {diff > 0 ? "+" : ""}{diff}
+                      </div>
+                      <div style={{ fontSize: "9px", color: C.muted, marginTop: "2px" }}>
+                        {diff > 0.5 ? "higher than expected" : diff < -0.5 ? "lower than expected" : "on track"}
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+              {pred.dosed && (
+                <div style={{ fontSize: "10px", color: C.muted, marginTop: "8px" }}>
+                  Based on {pred.dosedTo} ppm after last dose · sun-weighted decay
+                </div>
+              )}
+            </Card>
+          )}
+
           <Card>
             <Cap>FREE CHLORINE READING (PPM)</Cap>
             <input style={{ ...S.input, fontSize: "36px", padding: "14px", textAlign: "center" }}
               type="number" step="0.1" min="0" max="20" placeholder="0.0"
               value={log.fc} onChange={e => setLog(d => ({ ...d, fc: e.target.value }))} />
             {log.fc && !isNaN(fcVal) && (
-              <div style={{ marginTop: "8px", fontSize: "11px", color: fcVal < minFC ? C.danger : fcVal < maxFC ? C.warn : C.good }}>
-                {fcVal < minFC ? `⚠ Below safe min (${minFC} ppm)` : fcVal < maxFC ? `↓ Below target top (${maxFC} ppm)` : `✓ At or above target`}
-              </div>
-            )}
-            {prediction() && (
-              <div style={{ marginTop: "6px", fontSize: "10px", color: C.muted }}>
-                Model predicted {prediction().fc} ppm today
-              </div>
+              <>
+                <div style={{ marginTop: "8px", fontSize: "11px", color: fcVal < minFC ? C.danger : fcVal < maxFC ? C.warn : C.good }}>
+                  {fcVal < minFC ? `⚠ Below safe min (${minFC} ppm)` : fcVal < maxFC ? `↓ Below target top (${maxFC} ppm)` : `✓ At or above target`}
+                </div>
+                {diffLabel && (
+                  <div style={{ marginTop: "4px", fontSize: "11px", color: diffColor }}>
+                    {diffLabel}
+                  </div>
+                )}
+              </>
             )}
           </Card>
           <Card>
@@ -890,6 +935,14 @@ export default function PoolApp() {
                     {m.tempF != null ? ` · ${m.tempF}°F` : ""}
                     {m.bathers > 0 ? ` · ${["","Light","","Moderate","","","Heavy"][m.bathers] || "Swimmers"}` : ""}
                   </div>
+                  {m.predictedFC !== null && m.predictedFC !== undefined && (
+                    <div style={{ fontSize: "10px", color: C.muted, marginTop: "2px" }}>
+                      predicted {m.predictedFC} ppm
+                      <span style={{ color: m.fc > m.predictedFC + 0.3 ? C.good : m.fc < m.predictedFC - 0.3 ? C.danger : C.muted, marginLeft: "6px" }}>
+                        ({m.fc > m.predictedFC ? "+" : ""}{Math.round((m.fc - m.predictedFC) * 10) / 10})
+                      </span>
+                    </div>
+                  )}
                   {m.effectiveFC && (
                     <div style={{ fontSize: "10px", color: C.accent, marginTop: "2px" }}>
                       + added {m.ozAdded} oz → {m.effectiveFC} ppm after dose
