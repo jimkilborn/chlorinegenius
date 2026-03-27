@@ -36,16 +36,52 @@ const doseOz = (gallons, ppm, conc = 10) => {
   return Math.round((ppm * gallons / 10000) * ozPer10kPer1ppm * 10) / 10;
 };
 
-const calcDecay = ({ uvIndex = 5, tempF = 85, shadeFactor = 1.0, cya = 30, multiplier = 1.0 }) => {
+// Base decay rate in ppm per UV-active hour (not per day)
+// Sun hours = 8am–8pm = 12 hrs/day. Full daily rate ÷ 12 = hourly UV rate.
+// Nighttime residual = 10% of hourly rate (temp-driven chemical breakdown, no UV).
+const calcHourlyDecay = ({ uvIndex = 5, tempF = 85, shadeFactor = 1.0, cya = 30, multiplier = 1.0 }) => {
   const uv   = Math.max(0.15, uvIndex / 6);
   const temp = Math.max(0.4,  (tempF - 45) / 55);
   const cya_ = Math.max(0.25, 1 - cya / 220);
-  return 1.3 * uv * temp * shadeFactor * cya_ * multiplier;
+  const dailyRate = 1.3 * uv * temp * shadeFactor * cya_ * multiplier;
+  return {
+    sunHour:   dailyRate / 12,       // ppm lost per hour of sunlight (8am–8pm)
+    nightHour: (dailyRate / 12) * 0.10, // ppm lost per hour overnight
+  };
+};
+
+// Sun hours: 8am–8pm local time (hour 8–20)
+const SUN_START = 8;
+const SUN_END   = 20;
+
+// Calculate weighted ppm loss between two Date objects
+const sunWeightedLoss = (startDate, endDate, decayParams) => {
+  const { sunHour, nightHour } = calcHourlyDecay(decayParams);
+  let loss = 0;
+  let cursor = new Date(startDate);
+  const end  = new Date(endDate);
+  // Walk hour by hour (cap at 240h = 10 days to prevent runaway)
+  const maxHours = Math.min(240, Math.ceil((end - cursor) / 3600000));
+  for (let i = 0; i < maxHours; i++) {
+    const next = new Date(Math.min(cursor.getTime() + 3600000, end.getTime()));
+    const frac = (next - cursor) / 3600000; // fraction of this hour elapsed
+    const hr   = cursor.getHours();
+    loss += frac * (hr >= SUN_START && hr < SUN_END ? sunHour : nightHour);
+    cursor = next;
+    if (cursor >= end) break;
+  }
+  return loss;
+};
+
+// Daily rate for display purposes (full sun day, 12 sun hours)
+const calcDecayPerDay = (params) => {
+  const { sunHour, nightHour } = calcHourlyDecay(params);
+  return Math.round((sunHour * 12 + nightHour * 12) * 100) / 100;
 };
 
 const SHADE = {
-  full:    { label: "Full Sun",      desc: "6+ hrs direct sun",     factor: 1.00 },
-  partial: { label: "Partial Shade", desc: "3–6 hrs direct sun",    factor: 0.62 },
+  full:    { label: "Full Sun",      desc: "6+ hrs direct sun",      factor: 1.00 },
+  partial: { label: "Partial Shade", desc: "3–6 hrs direct sun",     factor: 0.62 },
   heavy:   { label: "Heavy Shade",   desc: "Under 3 hrs direct sun", factor: 0.30 },
 };
 
@@ -151,6 +187,11 @@ export default function PoolApp() {
   // Log
   const [log, setLog] = useState({ fc: "", bathers: 0, notes: "" });
 
+  // Dose confirmation — shown after logging when a dose is recommended
+  const [pendingEntry, setPendingEntry] = useState(null); // the just-logged measurement
+  const [pendingDose,  setPendingDose]  = useState(0);    // recommended oz
+  const [customOz,     setCustomOz]     = useState("");   // user override
+
   // ── Boot ──────────────────────────────────────────────────────────────────
   useEffect(() => {
     const cfg  = store.get("pool-config");
@@ -176,14 +217,22 @@ export default function PoolApp() {
   const prediction = useCallback(() => {
     if (!meas.length || !config) return null;
     const last = meas[meas.length - 1];
-    const daysSince = (Date.now() - new Date(last.date).getTime()) / 86400000;
+    const startDate = new Date(last.date);
+    const nowDate   = new Date();
+    const daysSince = (nowDate - startDate) / 86400000;
     if (daysSince > 10) return null;
-    const shade = SHADE[config.shade]?.factor ?? 1.0;
-    const rate  = calcDecay({ uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade, cya: config.cya, multiplier: model.multiplier });
+    // Use post-dose FC as baseline if user confirmed adding chlorine
+    const baseFC  = last.effectiveFC ?? last.fc;
+    const shade   = SHADE[config.shade]?.factor ?? 1.0;
+    const params  = { uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade, cya: config.cya, multiplier: model.multiplier };
+    const loss    = sunWeightedLoss(startDate, nowDate, params);
+    const ratePerDay = calcDecayPerDay(params);
     return {
-      fc:   Math.max(0, Math.round((last.fc - rate * daysSince) * 10) / 10),
-      days: Math.round(daysSince * 10) / 10,
-      rate: Math.round(rate * 100) / 100,
+      fc:     Math.max(0, Math.round((baseFC - loss) * 10) / 10),
+      days:   Math.round(daysSince * 10) / 10,
+      rate:   ratePerDay,
+      dosed:  !!last.effectiveFC,
+      dosedTo: last.effectiveFC,
     };
   }, [meas, config, weather, model, effectiveTempF]);
 
@@ -229,31 +278,74 @@ export default function PoolApp() {
   };
 
   // ── Save measurement ──────────────────────────────────────────────────────
+  const updateDecayModel = (priorMeas, measuredFC) => {
+    if (!priorMeas) return;
+    const startDate = new Date(priorMeas.date);
+    const nowDate   = new Date();
+    const startFC   = priorMeas.effectiveFC ?? priorMeas.fc;
+    const actualLoss = startFC - measuredFC;
+    if (actualLoss <= 0) return; // FC went up (chlorine was added externally) — skip
+    const shade = SHADE[config.shade]?.factor ?? 1.0;
+    // What would baseline model (multiplier=1) have predicted for this exact window?
+    const baseParams = { uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade, cya: config.cya, multiplier: 1.0 };
+    const baseLoss = sunWeightedLoss(startDate, nowDate, baseParams);
+    if (baseLoss <= 0) return;
+    // Observed multiplier = actual loss / what baseline predicted
+    const observed = actualLoss / baseLoss;
+    const newMult  = Math.min(3.5, Math.max(0.2, model.multiplier * 0.65 + observed * 0.35));
+    const newModel = { multiplier: Math.round(newMult * 1000) / 1000, updated: new Date().toISOString() };
+    setModel(newModel);
+    store.set("decay-model", newModel);
+  };
+
   const saveLog = () => {
     const fc = parseFloat(log.fc);
     if (isNaN(fc) || fc < 0) return;
     const entry = { id: Date.now(), date: new Date().toISOString(), fc, bathers: log.bathers, notes: log.notes, uvIndex: weather?.uvIndex, tempF: weather?.tempF };
+    const prior = meas.length > 0 ? meas[meas.length - 1] : null;
+
+    // Update decay model from prior → this measurement
+    updateDecayModel(prior, fc);
+
+    // Save measurement
     const newMeas = [...meas, entry];
     setMeas(newMeas);
     store.set("measurements", newMeas);
-
-    // Update learned decay multiplier
-    if (meas.length > 0) {
-      const last = meas[meas.length - 1];
-      const daysSince = (Date.now() - new Date(last.date).getTime()) / 86400000;
-      if (daysSince > 0.4 && last.fc > fc) {
-        const actualRate = (last.fc - fc) / daysSince;
-        const shade = SHADE[config.shade]?.factor ?? 1.0;
-        const baseRate = calcDecay({ uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade, cya: config.cya, multiplier: 1.0 });
-        if (baseRate > 0) {
-          const newMult = Math.min(3.5, Math.max(0.2, model.multiplier * 0.65 + (actualRate / baseRate) * 0.35));
-          const newModel = { multiplier: Math.round(newMult * 1000) / 1000, updated: new Date().toISOString() };
-          setModel(newModel);
-          store.set("decay-model", newModel);
-        }
-      }
-    }
     setLog({ fc: "", bathers: 0, notes: "" });
+
+    // Calculate recommended dose — if nonzero, go to dose confirm screen
+    const maxFC = maxFCforCYA(config.cya);
+    const needed = Math.max(0, maxFC - fc);
+    const recommendedOz = doseOz(config.gallons, needed, config.conc);
+    if (recommendedOz > 0) {
+      setPendingEntry(entry);
+      setPendingDose(recommendedOz);
+      setCustomOz("");
+      setScreen("doseConfirm");
+    } else {
+      setPendingEntry(null);
+      setScreen("dashboard");
+    }
+  };
+
+  // ── Confirm dose was added ────────────────────────────────────────────────
+  const confirmDose = (ozAdded) => {
+    if (!pendingEntry) { setScreen("dashboard"); return; }
+    // Convert oz added → ppm gained
+    const ozPer10kPer1ppm = 10.65 * (10 / config.conc);
+    const ppmAdded = (ozAdded / ozPer10kPer1ppm) * (10000 / config.gallons);
+    const effectiveFC = Math.round((pendingEntry.fc + ppmAdded) * 10) / 10;
+
+    // Update the entry with effectiveFC so predictions use post-dose level
+    const updated = meas.map(m => m.id === pendingEntry.id ? { ...m, effectiveFC, ozAdded: Math.round(ozAdded * 10) / 10 } : m);
+    setMeas(updated);
+    store.set("measurements", updated);
+    setPendingEntry(null);
+    setScreen("dashboard");
+  };
+
+  const skipDose = () => {
+    setPendingEntry(null);
     setScreen("dashboard");
   };
 
@@ -265,6 +357,90 @@ export default function PoolApp() {
       ))}
     </div>
   );
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // DOSE CONFIRMATION
+  // ─────────────────────────────────────────────────────────────────────────
+  if (screen === "doseConfirm" && pendingEntry) {
+    const maxFC = maxFCforCYA(config.cya);
+    const ozPer10kPer1ppm = 10.65 * (10 / config.conc);
+    const customPpm = customOz ? Math.round(((parseFloat(customOz) / ozPer10kPer1ppm) * (10000 / config.gallons)) * 10) / 10 : 0;
+    const customEffectiveFC = Math.round((pendingEntry.fc + customPpm) * 10) / 10;
+
+    return (
+      <div style={S.app}>
+        <FontLoader />
+        <div style={S.header}>
+          <div>
+            <div style={S.title}>CHLOR.IO</div>
+            <div style={S.sub}>Did you add chlorine?</div>
+          </div>
+        </div>
+        <div style={S.content}>
+
+          <Card style={{ borderColor: `${C.accent}55` }}>
+            <Cap>MEASURED FC</Cap>
+            <div style={{ display: "flex", alignItems: "baseline", gap: "8px", marginBottom: "6px" }}>
+              <div style={{ ...S.bigNum, fontSize: "36px", color: C.warn }}>{pendingEntry.fc}</div>
+              <div style={{ color: C.muted, fontSize: "14px" }}>ppm</div>
+              <div style={{ color: C.muted, fontSize: "12px", marginLeft: "4px" }}>→ target {maxFC} ppm</div>
+            </div>
+            <div style={{ fontSize: "11px", color: C.accent }}>
+              Recommended: <strong>{pendingDose} oz</strong> of {config.conc}% liquid chlorine
+            </div>
+          </Card>
+
+          {/* Option 1 — added full recommended dose */}
+          <Card
+            style={{ cursor: "pointer", borderColor: `${C.good}44` }}
+            onClick={() => confirmDose(pendingDose)}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <div style={{ fontSize: "13px", color: C.good, fontWeight: 600 }}>✓ Yes — added {pendingDose} oz</div>
+                <div style={{ fontSize: "10px", color: C.muted, marginTop: "4px" }}>
+                  Effective FC: {Math.round((pendingEntry.fc + (pendingDose / ozPer10kPer1ppm) * (10000 / config.gallons)) * 10) / 10} ppm → predictions update from this level
+                </div>
+              </div>
+              <div style={{ fontSize: "20px", color: C.good }}>→</div>
+            </div>
+          </Card>
+
+          {/* Option 2 — added a different amount */}
+          <Card style={{ borderColor: `${C.accent}33` }}>
+            <Cap>ADDED A DIFFERENT AMOUNT</Cap>
+            <div style={{ display: "flex", gap: "8px", marginBottom: "8px" }}>
+              <input
+                style={{ ...S.input, flex: 1 }}
+                type="number" step="0.5" min="0"
+                placeholder={`oz of ${config.conc}% chlorine`}
+                value={customOz}
+                onChange={e => setCustomOz(e.target.value)}
+              />
+              <Btn primary
+                style={{ flexShrink: 0, opacity: customOz && parseFloat(customOz) > 0 ? 1 : 0.35 }}
+                onClick={() => { if (customOz && parseFloat(customOz) > 0) confirmDose(parseFloat(customOz)); }}>
+                Confirm
+              </Btn>
+            </div>
+            {customOz && parseFloat(customOz) > 0 && (
+              <div style={{ fontSize: "10px", color: C.muted }}>
+                Adds ~{customPpm} ppm → effective FC: <span style={{ color: C.accent }}>{customEffectiveFC} ppm</span>
+              </div>
+            )}
+          </Card>
+
+          {/* Option 3 — didn't add */}
+          <Btn ghost style={{ width: "100%" }} onClick={skipDose}>
+            Not adding chlorine right now
+          </Btn>
+          <div style={{ fontSize: "10px", color: C.muted, textAlign: "center", marginTop: "8px" }}>
+            Skipping will base predictions on your measured {pendingEntry.fc} ppm only
+          </div>
+
+        </div>
+      </div>
+    );
+  }
 
   // ─────────────────────────────────────────────────────────────────────────
   // LOADING
@@ -437,7 +613,10 @@ export default function PoolApp() {
                   </div>
                 </div>
                 <div style={{ fontSize: "10px", color: C.muted, marginTop: "4px" }}>
-                  Measured {pred.days}d ago · losing ~{pred.rate} ppm/day
+                  {pred.dosed
+                    ? <>Dosed to <span style={{color:C.accent}}>{pred.dosedTo} ppm</span> · {pred.days}d ago · losing ~{pred.rate} ppm/day</>
+                    : <>Measured {pred.days}d ago · losing ~{pred.rate} ppm/day</>
+                  }
                 </div>
                 <div style={{ marginTop: "10px", padding: "8px 12px", background: C.bg, borderRadius: "8px", fontSize: "11px", color: fcColor }}>
                   {{ good: `✓ In range — dose to ${maxFC} ppm tonight`, low: "↓ Getting low — add chlorine soon", critical: "⚠ Below safe minimum — add immediately" }[status]}
@@ -455,10 +634,17 @@ export default function PoolApp() {
 
           {/* Dose recommendation */}
           {pred && needed > 0.05 && (() => {
-            const fc24h = Math.max(0, Math.round((maxFC - pred.rate) * 10) / 10);
-            const fc36h = Math.max(0, Math.round((maxFC - pred.rate * 1.5) * 10) / 10);
-            const ok24  = fc24h >= minFC;
-            const ok36  = fc36h >= minFC;
+            // Project forward using sun-weighted loss from NOW
+            const shade   = SHADE[config.shade]?.factor ?? 1.0;
+            const params  = { uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade, cya: config.cya, multiplier: model.multiplier };
+            const now24   = new Date(Date.now() + 24 * 3600000);
+            const now36   = new Date(Date.now() + 36 * 3600000);
+            const loss24  = sunWeightedLoss(new Date(), now24, params);
+            const loss36  = sunWeightedLoss(new Date(), now36, params);
+            const fc24h   = Math.max(0, Math.round((maxFC - loss24) * 10) / 10);
+            const fc36h   = Math.max(0, Math.round((maxFC - loss36) * 10) / 10);
+            const ok24    = fc24h >= minFC;
+            const ok36    = fc36h >= minFC;
             return (
               <Card>
                 <Cap>RECOMMENDED DOSE</Cap>
@@ -496,8 +682,12 @@ export default function PoolApp() {
           })()}
 
           {pred && needed <= 0.05 && (() => {
-            const fc24h = Math.max(0, Math.round((pred.fc - pred.rate) * 10) / 10);
-            const fc36h = Math.max(0, Math.round((pred.fc - pred.rate * 1.5) * 10) / 10);
+            const shade   = SHADE[config.shade]?.factor ?? 1.0;
+            const params  = { uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade, cya: config.cya, multiplier: model.multiplier };
+            const now24   = new Date(Date.now() + 24 * 3600000);
+            const now36   = new Date(Date.now() + 36 * 3600000);
+            const fc24h   = Math.max(0, Math.round((pred.fc - sunWeightedLoss(new Date(), now24, params)) * 10) / 10);
+            const fc36h   = Math.max(0, Math.round((pred.fc - sunWeightedLoss(new Date(), now36, params)) * 10) / 10);
             return (
               <Card style={{ borderColor: fc24h >= minFC ? `${C.good}44` : `${C.warn}44` }}>
                 <div style={{ fontSize: "12px", color: C.good }}>✓ In safe range — no dose needed now</div>
@@ -700,6 +890,11 @@ export default function PoolApp() {
                     {m.tempF != null ? ` · ${m.tempF}°F` : ""}
                     {m.bathers > 0 ? ` · ${["","Light","","Moderate","","","Heavy"][m.bathers] || "Swimmers"}` : ""}
                   </div>
+                  {m.effectiveFC && (
+                    <div style={{ fontSize: "10px", color: C.accent, marginTop: "2px" }}>
+                      + added {m.ozAdded} oz → {m.effectiveFC} ppm after dose
+                    </div>
+                  )}
                   {m.notes ? <div style={{ fontSize: "10px", color: C.muted, marginTop: "2px", fontStyle: "italic" }}>"{m.notes}"</div> : null}
                 </div>
               </div>
