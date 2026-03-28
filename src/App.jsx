@@ -1,5 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
 
+// ─── Version ─────────────────────────────────────────────────────────────────
+const APP_VERSION = "1.0.8";
+
 // ─── Fonts ────────────────────────────────────────────────────────────────────
 const FontLoader = () => {
   useEffect(() => {
@@ -596,7 +599,7 @@ export default function PoolApp() {
         <div style={S.header}>
           <div>
             <div style={S.title}>CHLOR.IO</div>
-            <div style={S.sub}>{config.city} · {config.gallons.toLocaleString()} gal</div>
+            <div style={S.sub}>{config.city} · {config.gallons.toLocaleString()} gal · v{APP_VERSION}</div>
           </div>
           <Btn ghost style={{ padding: "6px 12px", fontSize: "10px" }} onClick={() => setScreen("log")}>+ LOG FC</Btn>
         </div>
@@ -1118,7 +1121,7 @@ export default function PoolApp() {
           <Btn ghost style={{ width: "100%", marginBottom: "10px" }} onClick={resetModel}>Reset Decay Model</Btn>
           <Btn ghost style={{ width: "100%", color: C.danger, borderColor: `${C.danger}55` }} onClick={clearAll}>Clear All Data</Btn>
           <div style={{ marginTop: "16px", fontSize: "10px", color: C.muted, lineHeight: 1.8 }}>
-            Data is stored in your browser's local storage. CYA should be tested every 4–6 weeks.
+            Data is stored in your browser's local storage. CYA should be tested every 4–6 weeks. · v{APP_VERSION}
           </div>
         </div>
         <Nav />
