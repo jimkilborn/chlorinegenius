@@ -192,6 +192,10 @@ export default function PoolApp() {
   const [pendingDose,  setPendingDose]  = useState(0);    // recommended oz
   const [customOz,     setCustomOz]     = useState("");   // user override
 
+  // Retroactive dose correction
+  const [correctingDose, setCorrectingDose] = useState(false);
+  const [correctionFC,   setCorrectionFC]   = useState("");
+
   // ── Boot ──────────────────────────────────────────────────────────────────
   useEffect(() => {
     const cfg  = store.get("pool-config");
@@ -221,17 +225,19 @@ export default function PoolApp() {
     const nowDate   = new Date();
     const daysSince = (nowDate - startDate) / 86400000;
     if (daysSince > 10) return null;
-    // Use post-dose FC as baseline if user confirmed adding chlorine
     const baseFC  = last.effectiveFC ?? last.fc;
     const shade   = SHADE[config.shade]?.factor ?? 1.0;
     const params  = { uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade, cya: config.cya, multiplier: model.multiplier };
     const loss    = sunWeightedLoss(startDate, nowDate, params);
     const ratePerDay = calcDecayPerDay(params);
+    const fc      = Math.max(0, Math.round((baseFC - loss) * 10) / 10);
+    // If predicted FC has hit zero the model has no reliable baseline — flag it
+    const depleted = fc <= 0;
     return {
-      fc:     Math.max(0, Math.round((baseFC - loss) * 10) / 10),
-      days:   Math.round(daysSince * 10) / 10,
-      rate:   ratePerDay,
-      dosed:  !!last.effectiveFC,
+      fc, depleted,
+      days:    Math.round(daysSince * 10) / 10,
+      rate:    ratePerDay,
+      dosed:   !!last.effectiveFC,
       dosedTo: last.effectiveFC,
     };
   }, [meas, config, weather, model, effectiveTempF]);
@@ -578,9 +584,9 @@ export default function PoolApp() {
     const pred   = prediction();
     const minFC  = config ? minFCforCYA(config.cya) : 1;
     const maxFC  = config ? maxFCforCYA(config.cya) : 5;
-    const status = !pred ? "unknown" : pred.fc >= minFC ? "good" : pred.fc >= (minFC * 0.75) ? "low" : "critical";
-    const fcColor = { good: C.good, low: C.warn, critical: C.danger, unknown: C.muted }[status];
-    const needed = pred ? Math.max(0, maxFC - pred.fc) : maxFC;
+    const status = !pred ? "unknown" : pred.depleted ? "depleted" : pred.fc >= minFC ? "good" : pred.fc >= (minFC * 0.75) ? "low" : "critical";
+    const fcColor = { good: C.good, low: C.warn, critical: C.danger, depleted: C.danger, unknown: C.muted }[status];
+    const needed = (pred && !pred.depleted) ? Math.max(0, maxFC - pred.fc) : 0;
     const dose   = config ? doseOz(config.gallons, needed, config.conc) : 0;
     const last   = meas.length ? meas[meas.length - 1] : null;
 
@@ -615,12 +621,12 @@ export default function PoolApp() {
                 </div>
                 <div style={{ fontSize: "10px", color: C.muted, marginTop: "4px" }}>
                   {pred.dosed
-                    ? <>Dosed to <span style={{color:C.accent}}>{pred.dosedTo} ppm</span> · {pred.days}d ago · losing ~{pred.rate} ppm/day</>
-                    : <>Measured {pred.days}d ago · losing ~{pred.rate} ppm/day</>
+                    ? <>Dosed to <span style={{color:C.accent}}>{pred.dosedTo} ppm</span> · {pred.days}d ago · ~{pred.rate} ppm/sunny day</>
+                    : <>Measured {pred.days}d ago · ~{pred.rate} ppm/sunny day</>
                   }
                 </div>
                 <div style={{ marginTop: "10px", padding: "8px 12px", background: C.bg, borderRadius: "8px", fontSize: "11px", color: fcColor }}>
-                  {{ good: `✓ In range — dose to ${maxFC} ppm tonight`, low: "↓ Getting low — add chlorine soon", critical: "⚠ Below safe minimum — add immediately" }[status]}
+                  {{ good: `✓ In range — dose to ${maxFC} ppm tonight`, low: "↓ Getting low — add chlorine soon", critical: "⚠ Below safe minimum — add immediately", depleted: "⛔ Predicted FC has reached zero — test your water before adding chlorine" }[status]}
                 </div>
               </>
             ) : (
@@ -633,8 +639,24 @@ export default function PoolApp() {
             )}
           </Card>
 
+          {/* Depleted — require fresh test */}
+          {pred?.depleted && (
+            <Card style={{ borderColor: `${C.danger}66`, background: `${C.danger}08` }}>
+              <Cap style={{ color: C.danger }}>TEST REQUIRED BEFORE DOSING</Cap>
+              <div style={{ fontSize: "13px", color: C.text, marginBottom: "10px" }}>
+                The model has lost track of your chlorine level — it's estimated down to 0 ppm. Adding chlorine without a fresh reading risks over- or under-dosing.
+              </div>
+              <div style={{ fontSize: "11px", color: C.muted, marginBottom: "14px" }}>
+                Test your water with a kit or strips, then log the result. The app will calculate the correct dose from that fresh reading.
+              </div>
+              <Btn primary style={{ width: "100%" }} onClick={() => setScreen("log")}>
+                Test & Log FC Now →
+              </Btn>
+            </Card>
+          )}
+
           {/* Dose recommendation */}
-          {pred && needed > 0.05 && (() => {
+          {pred && !pred.depleted && needed > 0.05 && (() => {
             // Project forward using sun-weighted loss from NOW
             const shade   = SHADE[config.shade]?.factor ?? 1.0;
             const params  = { uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade, cya: config.cya, multiplier: model.multiplier };
@@ -664,11 +686,11 @@ export default function PoolApp() {
                 <div style={{ marginTop: "12px", borderTop: `1px solid ${C.border}`, paddingTop: "10px" }}>
                   <Cap>PROJECTED AFTER DOSING</Cap>
                   <div style={{ display: "flex", gap: "8px" }}>
-                    {[["Tomorrow", fc24h, ok24], ["+36 hrs", fc36h, ok36], ["Loss/day", pred.rate, true]].map(([lbl, val, ok]) => (
+                    {[["Tomorrow", fc24h, ok24], ["+36 hrs", fc36h, ok36], ["Sunny day rate", pred.rate, true]].map(([lbl, val, ok]) => (
                       <div key={lbl} style={{ flex: 1, background: C.bg, borderRadius: "8px", padding: "8px", textAlign: "center" }}>
-                        <div style={{ fontSize: "20px", fontWeight: 700, color: lbl === "Loss/day" ? C.text : ok ? C.good : C.danger }}>{val}</div>
+                        <div style={{ fontSize: "20px", fontWeight: 700, color: lbl === "Sunny day rate" ? C.text : ok ? C.good : C.danger }}>{val}</div>
                         <div style={{ fontSize: "9px", color: C.muted, marginTop: "2px" }}>{lbl}</div>
-                        {lbl !== "Loss/day" && <div style={{ fontSize: "9px", color: ok ? C.good : C.danger, marginTop: "2px" }}>{ok ? "✓ safe" : "⚠ low"}</div>}
+                        {lbl !== "Sunny day rate" && <div style={{ fontSize: "9px", color: ok ? C.good : C.danger, marginTop: "2px" }}>{ok ? "✓ safe" : "⚠ low"}</div>}
                       </div>
                     ))}
                   </div>
@@ -682,7 +704,7 @@ export default function PoolApp() {
             );
           })()}
 
-          {pred && needed <= 0.05 && (() => {
+          {pred && !pred.depleted && needed <= 0.05 && (() => {
             const shade   = SHADE[config.shade]?.factor ?? 1.0;
             const params  = { uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade, cya: config.cya, multiplier: model.multiplier };
             const now24   = new Date(Date.now() + 24 * 3600000);
@@ -693,9 +715,9 @@ export default function PoolApp() {
               <Card style={{ borderColor: fc24h >= minFC ? `${C.good}44` : `${C.warn}44` }}>
                 <div style={{ fontSize: "12px", color: C.good }}>✓ In safe range — no dose needed now</div>
                 <div style={{ display: "flex", gap: "8px", marginTop: "10px" }}>
-                  {[["Tomorrow", fc24h], ["+36 hrs", fc36h], ["Loss/day", pred.rate]].map(([lbl, val]) => (
+                  {[["Tomorrow", fc24h], ["+36 hrs", fc36h], ["Sunny day rate", pred.rate]].map(([lbl, val]) => (
                     <div key={lbl} style={{ flex: 1, background: C.bg, borderRadius: "8px", padding: "8px", textAlign: "center" }}>
-                      <div style={{ fontSize: "20px", fontWeight: 700, color: lbl === "Loss/day" ? C.text : val >= minFC ? C.good : C.warn }}>{val}</div>
+                      <div style={{ fontSize: "20px", fontWeight: 700, color: lbl === "Sunny day rate" ? C.muted : val >= minFC ? C.good : C.warn }}>{val}</div>
                       <div style={{ fontSize: "9px", color: C.muted, marginTop: "2px" }}>{lbl}</div>
                     </div>
                   ))}
@@ -745,9 +767,60 @@ export default function PoolApp() {
               <Cap>LAST MEASUREMENT</Cap>
               <div style={{ fontSize: "13px" }}>
                 <span style={{ color: C.accent, fontWeight: 600 }}>{last.fc} ppm FC</span>
-                <span style={{ color: C.muted }}> · {new Date(last.date).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</span>
+                <span style={{ color: C.muted }}> · {new Date(last.date).toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span>
               </div>
-              {last.notes ? <div style={{ fontSize: "11px", color: C.muted, marginTop: "4px" }}>"{last.notes}"</div> : null}
+              {last.effectiveFC ? (
+                <div style={{ fontSize: "11px", color: C.accent, marginTop: "6px" }}>
+                  ✓ Dosed to {last.effectiveFC} ppm · predictions use this as baseline
+                </div>
+              ) : (
+                <>
+                  <div style={{ fontSize: "11px", color: C.warn, marginTop: "6px" }}>
+                    No dose recorded — did you add chlorine after this reading?
+                  </div>
+                  {!correctingDose ? (
+                    <Btn ghost style={{ marginTop: "8px", fontSize: "10px", padding: "5px 12px" }}
+                      onClick={() => { setCorrectingDose(true); setCorrectionFC(""); }}>
+                      + Record a dose
+                    </Btn>
+                  ) : (
+                    <div style={{ marginTop: "10px" }}>
+                      <Cap>WHAT DID YOU DOSE TO? (PPM)</Cap>
+                      <div style={{ display: "flex", gap: "8px", marginBottom: "8px", flexWrap: "wrap" }}>
+                        {[maxFCforCYA(config.cya), maxFCforCYA(config.cya) - 1, maxFCforCYA(config.cya) - 2].map(v => (
+                          <Btn key={v} primary={correctionFC==v} ghost={correctionFC!=v}
+                            onClick={() => setCorrectionFC(v)}>{v} ppm</Btn>
+                        ))}
+                      </div>
+                      <div style={{ display: "flex", gap: "8px" }}>
+                        <input style={{ ...S.input, flex: 1 }} type="number" step="0.5" placeholder="Custom ppm"
+                          value={correctionFC} onChange={e => setCorrectionFC(e.target.value)} />
+                        <Btn primary
+                          style={{ flexShrink: 0, opacity: correctionFC && parseFloat(correctionFC) > 0 ? 1 : 0.4 }}
+                          onClick={() => {
+                            const fc = parseFloat(correctionFC);
+                            if (!fc || fc <= 0) return;
+                            // Patch effectiveFC onto the last measurement
+                            const updated = meas.map((m, i) =>
+                              i === meas.length - 1 ? { ...m, effectiveFC: fc, ozAdded: "manual" } : m
+                            );
+                            setMeas(updated);
+                            store.set("measurements", updated);
+                            setCorrectingDose(false);
+                            setCorrectionFC("");
+                          }}>
+                          Save ✓
+                        </Btn>
+                      </div>
+                      <Btn ghost style={{ marginTop: "8px", fontSize: "10px", padding: "5px 12px" }}
+                        onClick={() => setCorrectingDose(false)}>
+                        Cancel
+                      </Btn>
+                    </div>
+                  )}
+                </>
+              )}
+              {last.notes ? <div style={{ fontSize: "11px", color: C.muted, marginTop: "6px" }}>"{last.notes}"</div> : null}
             </Card>
           )}
 
