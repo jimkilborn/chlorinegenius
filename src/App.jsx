@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 
 // ─── Version ─────────────────────────────────────────────────────────────────
-const APP_VERSION = "1.1.0";
+const APP_VERSION = "1.1.2";
 
 // ─── Fonts ────────────────────────────────────────────────────────────────────
 const FontLoader = () => {
@@ -42,6 +42,9 @@ const doseOz = (gallons, ppm, conc = 10) => {
 // Base decay rate in ppm per UV-active hour (not per day)
 // Sun hours = 8am–8pm = 12 hrs/day. Full daily rate ÷ 12 = hourly UV rate.
 // Nighttime residual = 10% of hourly rate (temp-driven chemical breakdown, no UV).
+// Round to nearest 0.5 — matches test kit precision
+const round05 = (v) => Math.round(v * 2) / 2;
+
 const calcHourlyDecay = ({ uvIndex = 5, tempF = 85, shadeFactor = 1.0, cya = 30, multiplier = 1.0 }) => {
   const uv   = Math.max(0.15, uvIndex / 6);
   const temp = Math.max(0.4,  (tempF - 45) / 55);
@@ -198,16 +201,20 @@ export default function PoolApp() {
   const [geoLoad, setGeoLoad] = useState(false);
 
   // Log
-  const [log, setLog] = useState({ fc: "", bathers: 0, notes: "" });
+  const [log, setLog] = useState({ fc: "", bathers: 0, notes: "", debris: "none" });
 
   // Dose confirmation — shown after logging when a dose is recommended
-  const [pendingEntry, setPendingEntry] = useState(null); // the just-logged measurement
-  const [pendingDose,  setPendingDose]  = useState(0);    // recommended oz
-  const [customOz,     setCustomOz]     = useState("");   // user override
+  const [pendingEntry, setPendingEntry] = useState(null);
+  const [pendingDose,  setPendingDose]  = useState(0);
+  const [customOz,     setCustomOz]     = useState("");
 
   // Retroactive dose correction
   const [correctingDose, setCorrectingDose] = useState(false);
   const [correctionFC,   setCorrectionFC]   = useState("");
+
+  // Settings screen state (hoisted to avoid React hooks-in-conditional bug)
+  const [heaterOn,   setHeaterOn]   = useState(() => false);
+  const [heaterTemp, setHeaterTemp] = useState(() => 88);
 
   // ── Boot ──────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -216,6 +223,8 @@ export default function PoolApp() {
     const mdl  = store.get("decay-model");
     if (cfg) {
       setConfig(cfg); setMeas(ms || []); setModel(mdl || { multiplier: 1.0 });
+      setHeaterOn(cfg.heaterOn ?? false);
+      setHeaterTemp(cfg.heaterTemp ?? 88);
       setScreen("dashboard");
       fetchWeather(cfg.lat, cfg.lon).then(setWeather);
     } else {
@@ -240,11 +249,11 @@ export default function PoolApp() {
     if (daysSince > 10) return null;
     const baseFC      = last.effectiveFC ?? last.fc;
     const shade       = SHADE[config.shade]?.factor ?? 1.0;
-    const debrisMult  = DEBRIS_LEVELS[config.debrisLevel]?.mult ?? 1.0;
+    const debrisMult  = DEBRIS_LEVELS[last.debris]?.mult ?? 1.0;
     const params      = { uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade, cya: config.cya, multiplier: model.multiplier * debrisMult };
     const loss        = sunWeightedLoss(startDate, nowDate, params);
     const ratePerDay  = calcDecayPerDay(params);
-    const fc          = Math.max(0, Math.round((baseFC - loss) * 10) / 10);
+    const fc          = Math.max(0, round05(baseFC - loss));
     const depleted    = fc <= 0;
     return {
       fc, depleted,
@@ -323,7 +332,7 @@ export default function PoolApp() {
     const fc = parseFloat(log.fc);
     if (isNaN(fc) || fc < 0) return;
     const pred  = prediction();
-    const entry = { id: Date.now(), date: new Date().toISOString(), fc, predictedFC: pred?.fc ?? null, bathers: log.bathers, notes: log.notes, uvIndex: weather?.uvIndex, tempF: weather?.tempF };
+    const entry = { id: Date.now(), date: new Date().toISOString(), fc, predictedFC: pred?.fc ?? null, bathers: log.bathers, debris: log.debris ?? "none", notes: log.notes, uvIndex: weather?.uvIndex, tempF: weather?.tempF };
     const prior = meas.length > 0 ? meas[meas.length - 1] : null;
 
     // Update decay model from prior → this measurement (strip bather demand)
@@ -333,7 +342,7 @@ export default function PoolApp() {
     const newMeas = [...meas, entry];
     setMeas(newMeas);
     store.set("measurements", newMeas);
-    setLog({ fc: "", bathers: 0, notes: "" });
+    setLog({ fc: "", bathers: 0, notes: "", debris: "none" });
 
     // Calculate recommended dose — if nonzero, go to dose confirm screen
     const maxFC = maxFCforCYA(config.cya);
@@ -356,7 +365,7 @@ export default function PoolApp() {
     // Convert oz added → ppm gained
     const ozPer10kPer1ppm = 10.65 * (10 / config.conc);
     const ppmAdded = (ozAdded / ozPer10kPer1ppm) * (10000 / config.gallons);
-    const effectiveFC = Math.round((pendingEntry.fc + ppmAdded) * 10) / 10;
+    const effectiveFC = round05(pendingEntry.fc + ppmAdded);
 
     // Update the entry with effectiveFC so predictions use post-dose level
     const updated = meas.map(m => m.id === pendingEntry.id ? { ...m, effectiveFC, ozAdded: Math.round(ozAdded * 10) / 10 } : m);
@@ -387,7 +396,7 @@ export default function PoolApp() {
     const maxFC = maxFCforCYA(config.cya);
     const ozPer10kPer1ppm = 10.65 * (10 / config.conc);
     const customPpm = customOz ? Math.round(((parseFloat(customOz) / ozPer10kPer1ppm) * (10000 / config.gallons)) * 10) / 10 : 0;
-    const customEffectiveFC = Math.round((pendingEntry.fc + customPpm) * 10) / 10;
+    const customEffectiveFC = round05(pendingEntry.fc + customPpm);
 
     return (
       <div style={S.app}>
@@ -674,14 +683,14 @@ export default function PoolApp() {
           {pred && !pred.depleted && needed > 0.05 && (() => {
             // Project forward using sun-weighted loss from NOW
             const shade       = SHADE[config.shade]?.factor ?? 1.0;
-            const debrisMult  = DEBRIS_LEVELS[config.debrisLevel]?.mult ?? 1.0;
+            const debrisMult  = meas.length > 0 ? (DEBRIS_LEVELS[meas[meas.length-1].debris]?.mult ?? 1.0) : 1.0;
             const params      = { uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade, cya: config.cya, multiplier: model.multiplier * debrisMult };
             const now24       = new Date(Date.now() + 24 * 3600000);
             const now36       = new Date(Date.now() + 36 * 3600000);
             const loss24      = sunWeightedLoss(new Date(), now24, params);
             const loss36      = sunWeightedLoss(new Date(), now36, params);
-            const fc24h       = Math.max(0, Math.round((maxFC - loss24) * 10) / 10);
-            const fc36h       = Math.max(0, Math.round((maxFC - loss36) * 10) / 10);
+            const fc24h       = Math.max(0, round05(maxFC - loss24));
+            const fc36h       = Math.max(0, round05(maxFC - loss36));
             const ok24    = fc24h >= minFC;
             const ok36    = fc36h >= minFC;
             return (
@@ -712,7 +721,7 @@ export default function PoolApp() {
                   </div>
                   {(!ok24 || !ok36) && (
                     <div style={{ marginTop: "8px", fontSize: "11px", color: C.warn, padding: "6px 10px", background: `${C.warn}15`, borderRadius: "6px" }}>
-                      ⚠ Consider dosing to {Math.round((maxFC + pred.rate * 1.5) * 10) / 10} ppm to stay above {minFC} ppm for 36+ hrs
+                      ⚠ Consider dosing to {round05(maxFC + pred.rate * 1.5)} ppm to stay above {minFC} ppm for 36+ hrs
                     </div>
                   )}
                 </div>
@@ -722,12 +731,12 @@ export default function PoolApp() {
 
           {pred && !pred.depleted && needed <= 0.05 && (() => {
             const shade       = SHADE[config.shade]?.factor ?? 1.0;
-            const debrisMult  = DEBRIS_LEVELS[config.debrisLevel]?.mult ?? 1.0;
+            const debrisMult  = meas.length > 0 ? (DEBRIS_LEVELS[meas[meas.length-1].debris]?.mult ?? 1.0) : 1.0;
             const params      = { uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade, cya: config.cya, multiplier: model.multiplier * debrisMult };
             const now24       = new Date(Date.now() + 24 * 3600000);
             const now36       = new Date(Date.now() + 36 * 3600000);
-            const fc24h       = Math.max(0, Math.round((pred.fc - sunWeightedLoss(new Date(), now24, params)) * 10) / 10);
-            const fc36h       = Math.max(0, Math.round((pred.fc - sunWeightedLoss(new Date(), now36, params)) * 10) / 10);
+            const fc24h       = Math.max(0, round05(pred.fc - sunWeightedLoss(new Date(), now24, params)));
+            const fc36h       = Math.max(0, round05(pred.fc - sunWeightedLoss(new Date(), now36, params)));
             return (
               <Card style={{ borderColor: fc24h >= minFC ? `${C.good}44` : `${C.warn}44` }}>
                 <div style={{ fontSize: "12px", color: C.good }}>✓ In safe range — no dose needed now</div>
@@ -772,10 +781,10 @@ export default function PoolApp() {
                     <span style={{ color: C.muted }}>effective {effectiveTempF()}°F</span>
                   </div>
                 )}
-                {config.debrisLevel && config.debrisLevel !== "none" && (
+                {meas.length > 0 && meas[meas.length-1].debris && meas[meas.length-1].debris !== "none" && (
                   <div style={{ marginTop: "8px", padding: "7px 10px", background: C.bg, borderRadius: "7px", fontSize: "11px", display: "flex", justifyContent: "space-between" }}>
-                    <span style={{ color: C.warn }}>🍃 {DEBRIS_LEVELS[config.debrisLevel]?.label}</span>
-                    <span style={{ color: C.muted }}>×{DEBRIS_LEVELS[config.debrisLevel]?.mult} decay</span>
+                    <span style={{ color: C.warn }}>🍃 {DEBRIS_LEVELS[meas[meas.length-1].debris]?.label}</span>
+                    <span style={{ color: C.muted }}>×{DEBRIS_LEVELS[meas[meas.length-1].debris]?.mult} decay</span>
                   </div>
                 )}
               </>
@@ -850,7 +859,7 @@ export default function PoolApp() {
           <div style={{ fontSize: "10px", color: C.muted, padding: "4px 2px", lineHeight: 1.7 }}>
             CYA {config.cya}ppm · {SHADE[config.shade].label} · {config.conc}% product
             {config.heaterOn && config.heaterTemp ? ` · Heater ${config.heaterTemp}°F` : ""}
-            {config.debrisLevel && config.debrisLevel !== "none" ? ` · ${DEBRIS_LEVELS[config.debrisLevel]?.label}` : ""}
+            {(meas.length && meas[meas.length-1].debris && meas[meas.length-1].debris !== "none") ? ` · ${DEBRIS_LEVELS[meas[meas.length-1].debris]?.label}` : ""}
             {model.multiplier !== 1 ? ` · decay ×${model.multiplier.toFixed(2)}` : ""}
           </div>
         </div>
@@ -868,7 +877,7 @@ export default function PoolApp() {
     const fcVal  = parseFloat(log.fc);
     const pred   = prediction();
     const predFC = pred?.fc ?? null;
-    const diff   = (predFC !== null && !isNaN(fcVal)) ? Math.round((fcVal - predFC) * 10) / 10 : null;
+    const diff   = (predFC !== null && !isNaN(fcVal)) ? round05(fcVal - predFC) : null;
     const diffColor = diff === null ? C.muted : diff > 0.3 ? C.good : diff < -0.3 ? C.danger : C.warn;
     const diffLabel = diff === null ? null : diff > 0 ? `+${diff} above prediction` : diff < 0 ? `${diff} below prediction` : "matches prediction";
 
@@ -945,6 +954,24 @@ export default function PoolApp() {
               ))}
             </div>
           </Card>
+          <Card>
+            <Cap>ORGANIC LOAD</Cap>
+            <div style={{ fontSize: "10px", color: C.muted, marginBottom: "8px" }}>Pollen, leaves, or debris since last test?</div>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+              {Object.entries(DEBRIS_LEVELS).map(([k, v]) => (
+                <Btn key={k} primary={log.debris === k} ghost={log.debris !== k}
+                  onClick={() => setLog(d => ({ ...d, debris: k }))}>
+                  {v.label}
+                </Btn>
+              ))}
+            </div>
+            {log.debris !== "none" && (
+              <div style={{ fontSize: "10px", color: C.warn, marginTop: "8px" }}>
+                {DEBRIS_LEVELS[log.debris]?.desc} · ×{DEBRIS_LEVELS[log.debris]?.mult} decay applied to projections
+              </div>
+            )}
+          </Card>
+
           <Card>
             <Cap>NOTES (OPTIONAL)</Cap>
             <input style={S.input} type="text" placeholder="Rain, shock, pool party…"
@@ -1036,8 +1063,9 @@ export default function PoolApp() {
                     <div style={{ fontSize: "10px", color: C.muted, marginTop: "2px" }}>
                       predicted {m.predictedFC} ppm
                       <span style={{ color: m.fc > m.predictedFC + 0.3 ? C.good : m.fc < m.predictedFC - 0.3 ? C.danger : C.muted, marginLeft: "6px" }}>
-                        ({m.fc > m.predictedFC ? "+" : ""}{Math.round((m.fc - m.predictedFC) * 10) / 10})
+                        ({m.fc > m.predictedFC ? "+" : ""}{round05(m.fc - m.predictedFC)})
                       </span>
+                      {m.debris && m.debris !== "none" && <span style={{ color: C.warn, marginLeft: "6px" }}>· {DEBRIS_LEVELS[m.debris]?.label}</span>}
                     </div>
                   )}
                   {m.effectiveFC && (
@@ -1060,19 +1088,8 @@ export default function PoolApp() {
   // SETTINGS
   // ─────────────────────────────────────────────────────────────────────────
   if (screen === "settings") {
-    const [heaterOn,    setHeaterOn]    = useState(config?.heaterOn    ?? false);
-    const [heaterTemp,  setHeaterTemp]  = useState(config?.heaterTemp  ?? 88);
-    const [debrisLevel, setDebrisLevel] = useState(config?.debrisLevel ?? "none");
-
     const saveHeater = () => {
       const updated = { ...config, heaterOn, heaterTemp: parseInt(heaterTemp) };
-      store.set("pool-config", updated);
-      setConfig(updated);
-    };
-
-    const saveDebris = (level) => {
-      setDebrisLevel(level);
-      const updated = { ...config, debrisLevel: level };
       store.set("pool-config", updated);
       setConfig(updated);
     };
@@ -1144,23 +1161,6 @@ export default function PoolApp() {
               </>
             )}
             <Btn primary style={{ width: "100%", marginTop: "4px" }} onClick={saveHeater}>Save Heater ✓</Btn>
-          </Card>
-
-          {/* Debris level */}
-          <Card style={{ borderColor: debrisLevel !== "none" ? `${C.warn}55` : C.border }}>
-            <Cap>ORGANIC LOAD / DEBRIS</Cap>
-            <div style={{ fontSize: "11px", color: C.muted, marginBottom: "10px" }}>
-              Increases decay rate on top of your pool's learned multiplier. Reset to Normal in summer.
-            </div>
-            {Object.entries(DEBRIS_LEVELS).map(([k, v]) => (
-              <Btn key={k}
-                primary={debrisLevel === k} ghost={debrisLevel !== k}
-                style={{ width: "100%", marginBottom: "8px", flexDirection: "column", alignItems: "flex-start", padding: "10px 14px", gap: "2px" }}
-                onClick={() => saveDebris(k)}>
-                <span>{v.label} {k !== "none" ? `(×${v.mult})` : ""}</span>
-                <span style={{ fontSize: "10px", opacity: 0.65 }}>{v.desc}</span>
-              </Btn>
-            ))}
           </Card>
 
           <Btn ghost style={{ width: "100%", marginBottom: "10px" }} onClick={() => { setStep(0); setScreen("setup"); }}>Reconfigure Pool →</Btn>
