@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 
 // ─── Version ─────────────────────────────────────────────────────────────────
-const APP_VERSION = "1.2.1";
+const APP_VERSION = "1.2.2";
 
 // ─── Fonts ────────────────────────────────────────────────────────────────────
 const FontLoader = () => {
@@ -72,12 +72,23 @@ const SUN_END   = 20;
 // Bather load → one-time ppm consumption (not UV-driven, stripped from model learning)
 const BATHER_PPM = { 0: 0, 1: 0.2, 3: 0.5, 6: 1.0 };
 
-// Debris level → persistent background decay multiplier
-const DEBRIS_LEVELS = {
-  none:   { label: "Normal",       desc: "No unusual debris",         mult: 1.00 },
-  pollen: { label: "High Pollen",  desc: "Spring pollen, light debris", mult: 1.20 },
-  heavy:  { label: "Heavy Debris", desc: "Leaves, algae risk, storms",  mult: 1.40 },
+// Pollen level → fine particulate, sustained chemical demand
+const POLLEN_LEVELS = {
+  none:   { label: "None",         desc: "No notable pollen",           mult: 1.00 },
+  light:  { label: "Light Pollen", desc: "Visible dusting on surface",  mult: 1.15 },
+  heavy:  { label: "Heavy Pollen", desc: "Heavy coating, yellow water", mult: 1.30 },
 };
+
+// Debris level → leaves, organic matter, acute demand spike
+const DEBRIS_LEVELS = {
+  none:   { label: "None",          desc: "No notable debris",          mult: 1.00 },
+  light:  { label: "Light Debris",  desc: "Some leaves, light organic", mult: 1.15 },
+  heavy:  { label: "Heavy Debris",  desc: "Heavy leaves, storm runoff", mult: 1.35 },
+};
+
+// Combined organic load multiplier
+const organicMult = (pollen, debris) =>
+  (POLLEN_LEVELS[pollen]?.mult ?? 1.0) * (DEBRIS_LEVELS[debris]?.mult ?? 1.0);
 
 // Calculate weighted ppm loss between two Date objects
 const sunWeightedLoss = (startDate, endDate, decayParams) => {
@@ -210,7 +221,7 @@ export default function PoolApp() {
   const [geoLoad, setGeoLoad] = useState(false);
 
   // Log
-  const [log, setLog] = useState({ fc: "", bathers: 0, notes: "", debris: "none" });
+  const [log, setLog] = useState({ fc: "", bathers: 0, notes: "", pollen: "none", debris: "none" });
 
   // Dose confirmation — shown after logging when a dose is recommended
   const [pendingEntry, setPendingEntry] = useState(null);
@@ -258,7 +269,7 @@ export default function PoolApp() {
     if (daysSince > 10) return null;
     const baseFC      = last.effectiveFC ?? last.fc;
     const shade       = SHADE[config.shade]?.factor ?? 1.0;
-    const debrisMult  = DEBRIS_LEVELS[last.debris]?.mult ?? 1.0;
+    const debrisMult  = organicMult(last.pollen ?? 'none', last.debris ?? 'none');
     const params      = { uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade, cya: config.cya, multiplier: model.multiplier * debrisMult };
     const loss        = sunWeightedLoss(startDate, nowDate, params);
     const ratePerDay  = calcDecayPerDay(params);
@@ -304,6 +315,7 @@ export default function PoolApp() {
       predictedFC: null,                 // no prediction to compare against
       bathers: 0, debris: "none",
       notes: `Dosed ${Math.round(ozAdded * 10) / 10} oz without testing`,
+      pollen: "none", debris: "none",
       uvIndex: weather?.uvIndex,
       tempF: weather?.tempF,
     };
@@ -349,8 +361,8 @@ export default function PoolApp() {
     const shade = SHADE[config.shade]?.factor ?? 1.0;
     // Use the debris mult from the prior entry (conditions during the decay window)
     // This isolates the base pool multiplier from transient debris events
-    const priorDebrisMult = DEBRIS_LEVELS[priorMeas.debris]?.mult ?? 1.0;
-    // What would baseline (multiplier=1, with prior debris) have predicted?
+    const priorDebrisMult = organicMult(priorMeas.pollen ?? 'none', priorMeas.debris ?? 'none');
+    // What would baseline (multiplier=1, with prior organic load) have predicted?
     const baseParams = { uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade, cya: config.cya, multiplier: priorDebrisMult };
     const baseLoss   = sunWeightedLoss(startDate, nowDate, baseParams);
     if (baseLoss <= 0) return;
@@ -366,7 +378,7 @@ export default function PoolApp() {
     const fc = parseFloat(log.fc);
     if (isNaN(fc) || fc < 0) return;
     const pred  = prediction();
-    const entry = { id: Date.now(), date: new Date().toISOString(), fc, predictedFC: pred?.fc ?? null, bathers: log.bathers, debris: log.debris ?? "none", notes: log.notes, uvIndex: weather?.uvIndex, tempF: weather?.tempF };
+    const entry = { id: Date.now(), date: new Date().toISOString(), fc, predictedFC: pred?.fc ?? null, bathers: log.bathers, pollen: log.pollen ?? "none", debris: log.debris ?? "none", notes: log.notes, uvIndex: weather?.uvIndex, tempF: weather?.tempF };
     const prior = meas.length > 0 ? meas[meas.length - 1] : null;
 
     // Update decay model from prior → this measurement (strip bather + debris)
@@ -376,7 +388,7 @@ export default function PoolApp() {
     const newMeas = [...meas, entry];
     setMeas(newMeas);
     store.set("measurements", newMeas);
-    setLog({ fc: "", bathers: 0, notes: "", debris: "none" });
+    setLog({ fc: "", bathers: 0, notes: "", pollen: "none", debris: "none" });
 
     // Calculate recommended dose — if nonzero, go to dose confirm screen
     const maxFC = maxFCforCYA(config.cya);
@@ -520,7 +532,7 @@ export default function PoolApp() {
 
     // Hours until min after dosing (reuse same walk logic)
     const shade_      = SHADE[config.shade]?.factor ?? 1.0;
-    const debrisMult_ = meas.length > 0 ? (DEBRIS_LEVELS[meas[meas.length-1].debris]?.mult ?? 1.0) : 1.0;
+    const debrisMult_ = meas.length > 0 ? organicMult(meas[meas.length-1].pollen ?? 'none', meas[meas.length-1].debris ?? 'none') : 1.0;
     const params_     = { uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade_, cya: config.cya, multiplier: model.multiplier * debrisMult_ };
     let hrsUntilMin_ = null;
     for (let h = 1; h <= 96; h++) {
@@ -824,7 +836,7 @@ export default function PoolApp() {
           {pred && !pred.depleted && needed > 0.05 && (() => {
             // Project forward using sun-weighted loss from NOW
             const shade       = SHADE[config.shade]?.factor ?? 1.0;
-            const debrisMult  = meas.length > 0 ? (DEBRIS_LEVELS[meas[meas.length-1].debris]?.mult ?? 1.0) : 1.0;
+            const debrisMult  = meas.length > 0 ? organicMult(meas[meas.length-1].pollen ?? 'none', meas[meas.length-1].debris ?? 'none') : 1.0;
             const params      = { uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade, cya: config.cya, multiplier: model.multiplier * debrisMult };
             const now24       = new Date(Date.now() + 24 * 3600000);
             const now36       = new Date(Date.now() + 36 * 3600000);
@@ -886,7 +898,7 @@ export default function PoolApp() {
 
           {pred && !pred.depleted && needed <= 0.05 && (() => {
             const shade       = SHADE[config.shade]?.factor ?? 1.0;
-            const debrisMult  = meas.length > 0 ? (DEBRIS_LEVELS[meas[meas.length-1].debris]?.mult ?? 1.0) : 1.0;
+            const debrisMult  = meas.length > 0 ? organicMult(meas[meas.length-1].pollen ?? 'none', meas[meas.length-1].debris ?? 'none') : 1.0;
             const params      = { uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade, cya: config.cya, multiplier: model.multiplier * debrisMult };
 
             // Walk forward to find when current FC hits minFC
@@ -945,12 +957,20 @@ export default function PoolApp() {
                     <span style={{ color: C.muted }}>effective {effectiveTempF()}°F</span>
                   </div>
                 )}
-                {meas.length > 0 && meas[meas.length-1].debris && meas[meas.length-1].debris !== "none" && (
-                  <div style={{ marginTop: "8px", padding: "7px 10px", background: C.bg, borderRadius: "7px", fontSize: "11px", display: "flex", justifyContent: "space-between" }}>
-                    <span style={{ color: C.warn }}>🍃 {DEBRIS_LEVELS[meas[meas.length-1].debris]?.label}</span>
-                    <span style={{ color: C.muted }}>×{DEBRIS_LEVELS[meas[meas.length-1].debris]?.mult} decay</span>
-                  </div>
-                )}
+                {meas.length > 0 && (meas[meas.length-1].pollen !== "none" || meas[meas.length-1].debris !== "none") && (() => {
+                  const last_ = meas[meas.length-1];
+                  const mult_ = organicMult(last_.pollen ?? 'none', last_.debris ?? 'none');
+                  const parts = [
+                    last_.pollen !== "none" ? POLLEN_LEVELS[last_.pollen]?.label : null,
+                    last_.debris !== "none" ? DEBRIS_LEVELS[last_.debris]?.label : null,
+                  ].filter(Boolean).join(" + ");
+                  return (
+                    <div style={{ marginTop: "8px", padding: "7px 10px", background: C.bg, borderRadius: "7px", fontSize: "11px", display: "flex", justifyContent: "space-between" }}>
+                      <span style={{ color: C.warn }}>🍃 {parts}</span>
+                      <span style={{ color: C.muted }}>×{mult_.toFixed(2)} decay</span>
+                    </div>
+                  );
+                })()}
               </>
             ) : (
               <div style={{ fontSize: "11px", color: C.muted }}>Fetching weather…</div>
@@ -1023,7 +1043,7 @@ export default function PoolApp() {
           <div style={{ fontSize: "10px", color: C.muted, padding: "4px 2px", lineHeight: 1.7 }}>
             CYA {config.cya}ppm · {SHADE[config.shade].label} · {config.conc}% product
             {config.heaterOn && config.heaterTemp ? ` · Heater ${config.heaterTemp}°F` : ""}
-            {(meas.length && meas[meas.length-1].debris && meas[meas.length-1].debris !== "none") ? ` · ${DEBRIS_LEVELS[meas[meas.length-1].debris]?.label}` : ""}
+            {meas.length > 0 && (meas[meas.length-1].pollen !== "none" || meas[meas.length-1].debris !== "none") ? ` · ×${organicMult(meas[meas.length-1].pollen ?? 'none', meas[meas.length-1].debris ?? 'none').toFixed(2)} organic` : ""}
             {model.multiplier !== 1 ? ` · decay ×${model.multiplier.toFixed(2)}` : ""}
           </div>
         </div>
@@ -1041,7 +1061,7 @@ export default function PoolApp() {
     const fcVal  = parseFloat(log.fc);
 
     // Compute debris-aware prediction using the CURRENT log debris selection
-    const logDebrisMult = DEBRIS_LEVELS[log.debris]?.mult ?? 1.0;
+    const logDebrisMult = organicMult(log.pollen ?? 'none', log.debris ?? 'none');
     const predDebrisAware = (() => {
       if (!meas.length || !config) return null;
       const last = meas[meas.length - 1];
@@ -1074,10 +1094,22 @@ export default function PoolApp() {
         </div>
         <div style={S.content}>
 
-          {/* Debris selection — shown first so prediction reflects current conditions */}
-          <Card style={{ borderColor: log.debris !== "none" ? `${C.warn}55` : C.border }}>
-            <Cap>ORGANIC LOAD SINCE LAST TEST</Cap>
-            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: log.debris !== "none" ? "8px" : "0" }}>
+          {/* Pollen + Debris — shown first so prediction updates live */}
+          <Card style={{ borderColor: (log.pollen !== "none" || log.debris !== "none") ? `${C.warn}55` : C.border }}>
+            <Cap>CONDITIONS SINCE LAST TEST</Cap>
+
+            <div style={{ fontSize: "9px", color: C.muted, letterSpacing: "1.5px", textTransform: "uppercase", marginBottom: "6px" }}>Pollen</div>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "12px" }}>
+              {Object.entries(POLLEN_LEVELS).map(([k, v]) => (
+                <Btn key={k} primary={log.pollen === k} ghost={log.pollen !== k}
+                  onClick={() => setLog(d => ({ ...d, pollen: k }))}>
+                  {v.label}
+                </Btn>
+              ))}
+            </div>
+
+            <div style={{ fontSize: "9px", color: C.muted, letterSpacing: "1.5px", textTransform: "uppercase", marginBottom: "6px" }}>Leaves / Debris</div>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: (log.pollen !== "none" || log.debris !== "none") ? "10px" : "0" }}>
               {Object.entries(DEBRIS_LEVELS).map(([k, v]) => (
                 <Btn key={k} primary={log.debris === k} ghost={log.debris !== k}
                   onClick={() => setLog(d => ({ ...d, debris: k }))}>
@@ -1085,9 +1117,10 @@ export default function PoolApp() {
                 </Btn>
               ))}
             </div>
-            {log.debris !== "none" && (
+
+            {(log.pollen !== "none" || log.debris !== "none") && (
               <div style={{ fontSize: "10px", color: C.warn }}>
-                🍃 {DEBRIS_LEVELS[log.debris]?.desc} · prediction adjusted ×{DEBRIS_LEVELS[log.debris]?.mult}
+                Combined organic load ×{organicMult(log.pollen, log.debris).toFixed(2)} · prediction updated above ↑
               </div>
             )}
           </Card>
@@ -1217,10 +1250,12 @@ export default function PoolApp() {
               </div>
               {(() => {
                 const lastDebris = meas.length > 0 ? (meas[meas.length-1].debris ?? "none") : "none";
-                const debrisActive = lastDebris !== "none";
+                const lastPollen = meas.length > 0 ? (meas[meas.length-1].pollen ?? "none") : "none";
+                const debrisActive = lastDebris !== "none" || lastPollen !== "none";
                 let msg, color = C.muted;
                 if (model.multiplier > 1.2 && debrisActive) {
-                  msg = `Elevated consumption is expected — ${DEBRIS_LEVELS[lastDebris]?.label} logged. If decay stays high after pollen season ends, test for phosphates.`;
+                  const organicLabel = [lastPollen !== 'none' ? POLLEN_LEVELS[lastPollen]?.label : null, lastDebris !== 'none' ? DEBRIS_LEVELS[lastDebris]?.label : null].filter(Boolean).join(' + ');
+                  msg = `Elevated consumption is expected — ${organicLabel} logged. If decay stays high after pollen season ends, test for phosphates.`;
                 } else if (model.multiplier > 4.0) {
                   msg = "Very high consumption with no debris logged. Test your combined chlorine (CC) — if CC is above 0.5 ppm, a SLAM may be needed.";
                   color = C.warn;
@@ -1261,7 +1296,7 @@ export default function PoolApp() {
                       <span style={{ color: m.fc > m.predictedFC + 0.3 ? C.good : m.fc < m.predictedFC - 0.3 ? C.danger : C.muted, marginLeft: "6px" }}>
                         ({m.fc > m.predictedFC ? "+" : ""}{round05(m.fc - m.predictedFC)})
                       </span>
-                      {m.debris && m.debris !== "none" && <span style={{ color: C.warn, marginLeft: "6px" }}>· {DEBRIS_LEVELS[m.debris]?.label}</span>}
+                      {(m.pollen && m.pollen !== "none") && <span style={{ color: C.warn, marginLeft: "6px" }}>· {POLLEN_LEVELS[m.pollen]?.label}</span>}{(m.debris && m.debris !== "none") && <span style={{ color: C.warn, marginLeft: "4px" }}>+ {DEBRIS_LEVELS[m.debris]?.label}</span>}
                     </div>
                   )}
                   {m.effectiveFC && (
