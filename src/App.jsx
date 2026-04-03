@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 
 // ─── Version ─────────────────────────────────────────────────────────────────
-const APP_VERSION = "1.2.3";
+const APP_VERSION = "1.2.4";
 
 // ─── Fonts ────────────────────────────────────────────────────────────────────
 const FontLoader = () => {
@@ -768,14 +768,7 @@ export default function PoolApp() {
             <div style={S.title}>CHLOR.IO</div>
             <div style={S.sub}>{config.city} · {config.gallons.toLocaleString()} gal · v{APP_VERSION}</div>
           </div>
-          <div style={{ display: "flex", gap: "6px" }}>
-            {pred && !pred.depleted && dose > 0 && (
-              <Btn primary style={{ padding: "6px 12px", fontSize: "10px" }} onClick={() => { setAdjOz(dose); setScreen("doseOnly"); }}>
-                + DOSE
-              </Btn>
-            )}
-            <Btn ghost style={{ padding: "6px 12px", fontSize: "10px" }} onClick={() => setScreen("log")}>TEST & LOG</Btn>
-          </div>
+          <Btn ghost style={{ padding: "6px 12px", fontSize: "10px" }} onClick={() => setScreen("log")}>TEST & LOG</Btn>
         </div>
         <div style={S.content}>
 
@@ -816,6 +809,43 @@ export default function PoolApp() {
               </>
             )}
           </Card>
+
+          {/* Primary action — dose without testing */}
+          {pred && !pred.depleted && (
+            <Card style={{ borderColor: dose > 0 ? `${C.accent}66` : `${C.good}44`, background: dose > 0 ? `${C.accent}08` : `${C.good}05` }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
+                <div>
+                  <div style={{ fontSize: "12px", color: C.muted, marginBottom: "4px" }}>
+                    {dose > 0 ? "TONIGHT'S DOSE" : "NO DOSE NEEDED"}
+                  </div>
+                  {dose > 0 ? (
+                    <>
+                      <div style={{ display: "flex", alignItems: "baseline", gap: "6px" }}>
+                        <span style={{ ...S.bigNum, fontSize: "32px", color: C.accent }}>{dose}</span>
+                        <span style={{ fontSize: "12px", color: C.muted }}>oz of {config.conc}%</span>
+                      </div>
+                      <div style={{ fontSize: "10px", color: C.muted, marginTop: "2px" }}>
+                        raises ~{pred.fc} → {maxFC} ppm
+                      </div>
+                    </>
+                  ) : (
+                    <div style={{ fontSize: "13px", color: C.good }}>✓ Already at target</div>
+                  )}
+                </div>
+                {dose > 0 ? (
+                  <Btn primary style={{ flexShrink: 0, padding: "12px 16px", fontSize: "13px", fontWeight: 700 }}
+                    onClick={() => { setAdjOz(dose); setScreen("doseOnly"); }}>
+                    + DOSE
+                  </Btn>
+                ) : (
+                  <Btn ghost style={{ flexShrink: 0, padding: "10px 14px", fontSize: "11px" }}
+                    onClick={() => { setAdjOz(0); setScreen("doseOnly"); }}>
+                    Log dose
+                  </Btn>
+                )}
+              </div>
+            </Card>
+          )}
 
           {/* Depleted — require fresh test */}
           {pred?.depleted && (
@@ -1074,12 +1104,13 @@ export default function PoolApp() {
       const shade   = SHADE[config.shade]?.factor ?? 1.0;
       const params  = { uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade, cya: config.cya, multiplier: model.multiplier * logDebrisMult };
       const loss    = sunWeightedLoss(startDate, nowDate, params);
-      return Math.max(0, round05(baseFC - loss));
+      return { fc: Math.max(0, Math.round((baseFC - loss) * 10) / 10), loss: Math.round(loss * 100) / 100 };
     })();
 
     const pred   = prediction();
-    const predFC = predDebrisAware;
-    const diff   = (predFC !== null && !isNaN(fcVal)) ? round05(fcVal - predFC) : null;
+    const predFC = predDebrisAware?.fc ?? null;
+    const predLoss = predDebrisAware?.loss ?? null;
+    const diff   = (predFC !== null && !isNaN(fcVal)) ? Math.round((fcVal - predFC) * 10) / 10 : null;
     const diffColor = diff === null ? C.muted : diff > 0.3 ? C.good : diff < -0.3 ? C.danger : C.warn;
     const diffLabel = diff === null ? null : diff > 0 ? `+${diff} above prediction` : diff < 0 ? `${diff} below prediction` : "matches prediction";
 
@@ -1126,7 +1157,7 @@ export default function PoolApp() {
             )}
           </Card>
 
-          {/* Prediction comparison — debris-aware, updates as you change debris selection */}
+          {/* Prediction comparison — debris-aware, updates live as you change pollen/debris */}
           {predFC !== null && (
             <Card style={{ borderColor: `${C.accent}33`, padding: "12px 16px" }}>
               <Cap>MODEL PREDICTED</Cap>
@@ -1153,7 +1184,21 @@ export default function PoolApp() {
                   </>
                 )}
               </div>
-              {pred.dosed && (
+              <div style={{ marginTop: "10px", display: "flex", gap: "8px" }}>
+                <div style={{ flex: 1, background: C.bg, borderRadius: "6px", padding: "6px 8px", textAlign: "center" }}>
+                  <div style={{ fontSize: "13px", fontWeight: 600, color: C.text }}>-{predLoss}</div>
+                  <div style={{ fontSize: "9px", color: C.muted, marginTop: "1px" }}>ppm lost</div>
+                </div>
+                <div style={{ flex: 1, background: C.bg, borderRadius: "6px", padding: "6px 8px", textAlign: "center" }}>
+                  <div style={{ fontSize: "13px", fontWeight: 600, color: logDebrisMult > 1 ? C.warn : C.muted }}>×{(model.multiplier * logDebrisMult).toFixed(2)}</div>
+                  <div style={{ fontSize: "9px", color: C.muted, marginTop: "1px" }}>effective mult</div>
+                </div>
+                <div style={{ flex: 1, background: C.bg, borderRadius: "6px", padding: "6px 8px", textAlign: "center" }}>
+                  <div style={{ fontSize: "13px", fontWeight: 600, color: C.text }}>{round05(predFC)}</div>
+                  <div style={{ fontSize: "9px", color: C.muted, marginTop: "1px" }}>rounded est.</div>
+                </div>
+              </div>
+              {pred?.dosed && (
                 <div style={{ fontSize: "10px", color: C.muted, marginTop: "8px" }}>
                   Based on {pred.dosedTo} ppm after last dose · sun-weighted decay
                 </div>
