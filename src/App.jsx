@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 
 // ─── Version ─────────────────────────────────────────────────────────────────
-const APP_VERSION = "1.1.2";
+const APP_VERSION = "1.2.1";
 
 // ─── Fonts ────────────────────────────────────────────────────────────────────
 const FontLoader = () => {
@@ -15,22 +15,31 @@ const FontLoader = () => {
 };
 
 // ─── Chemistry ────────────────────────────────────────────────────────────────
-const minFCforCYA = (cya) => {
-  if (cya < 10) return 1;
-  if (cya < 30) return 2;
-  if (cya < 50) return 3;
-  if (cya < 70) return 4;
-  if (cya < 90) return 5;
-  return 6;
+
+// Exact TFP FC table per troublefreepool.com: [minFC, targetFC, slamFC]
+const TFP_TABLE = {
+    0: [1,  3,  10],
+   20: [2,  4,  12],
+   30: [2,  5,  12],
+   40: [3,  6,  16],
+   50: [4,  7,  20],
+   60: [4,  8,  24],
+   70: [5,  9,  28],
+   80: [5, 10,  32],
+   90: [6, 11,  36],
+  100: [7, 12,  40],
 };
-const maxFCforCYA = (cya) => {
-  if (cya < 10) return 3;
-  if (cya < 30) return 5;
-  if (cya < 50) return 7;
-  if (cya < 70) return 9;
-  if (cya < 90) return 11;
-  return 13;
+
+// Snap to nearest 10-ppm CYA bracket (round down)
+const tfpLookup = (cya) => {
+  const keys = [0, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+  const bracket = keys.reduce((prev, k) => (cya >= k ? k : prev), 0);
+  return TFP_TABLE[bracket] ?? TFP_TABLE[0];
 };
+
+const minFCforCYA  = (cya) => tfpLookup(cya)[0];
+const maxFCforCYA  = (cya) => tfpLookup(cya)[1];
+const slamFCforCYA = (cya) => tfpLookup(cya)[2];
 
 // 10% NaOCl: 10.65 oz raises 10,000 gal by 1 ppm
 const doseOz = (gallons, ppm, conc = 10) => {
@@ -284,6 +293,27 @@ export default function PoolApp() {
     finally { setGeoLoad(false); }
   };
 
+  // ── Record a dose using predicted FC (no test strip needed) ─────────────────
+  const savePredictedDose = (predFC, ozAdded, maxFC_) => {
+    const synth = {
+      id: Date.now(), date: new Date().toISOString(),
+      fc: predFC,
+      effectiveFC: maxFC_,
+      ozAdded: Math.round(ozAdded * 10) / 10,
+      estimated: true,                   // flagged — not a real measurement
+      predictedFC: null,                 // no prediction to compare against
+      bathers: 0, debris: "none",
+      notes: `Dosed ${Math.round(ozAdded * 10) / 10} oz without testing`,
+      uvIndex: weather?.uvIndex,
+      tempF: weather?.tempF,
+    };
+    const newMeas = [...meas, synth];
+    setMeas(newMeas);
+    store.set("measurements", newMeas);
+    // Intentionally skip updateDecayModel — no real FC reading to learn from
+    setScreen("dashboard");
+  };
+
   // ── Locate by ZIP ─────────────────────────────────────────────────────────
   const lookupZip = async () => {
     if (!wiz.zip || wiz.zip.length < 5) { setGeoErr("Enter a 5-digit ZIP first"); return; }
@@ -306,23 +336,27 @@ export default function PoolApp() {
   };
 
   // ── Save measurement ──────────────────────────────────────────────────────
-  const updateDecayModel = (priorMeas, measuredFC, currentBathers = 0) => {
+  const updateDecayModel = (priorMeas, measuredFC, currentBathers = 0, currentDebris = "none") => {
     if (!priorMeas) return;
     const startDate  = new Date(priorMeas.date);
     const nowDate    = new Date();
     const startFC    = priorMeas.effectiveFC ?? priorMeas.fc;
-    // Strip bather consumption from both ends so UV/temp model stays clean
+    // Strip bather consumption from both ends
     const priorBatherPpm   = BATHER_PPM[priorMeas.bathers] ?? 0;
     const currentBatherPpm = BATHER_PPM[currentBathers]    ?? 0;
     const actualLoss = (startFC - priorBatherPpm) - (measuredFC + currentBatherPpm);
     if (actualLoss <= 0) return;
     const shade = SHADE[config.shade]?.factor ?? 1.0;
-    // Baseline model (multiplier=1, no debris) — debris is kept separate so multiplier stays pool-specific
-    const baseParams = { uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade, cya: config.cya, multiplier: 1.0 };
+    // Use the debris mult from the prior entry (conditions during the decay window)
+    // This isolates the base pool multiplier from transient debris events
+    const priorDebrisMult = DEBRIS_LEVELS[priorMeas.debris]?.mult ?? 1.0;
+    // What would baseline (multiplier=1, with prior debris) have predicted?
+    const baseParams = { uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade, cya: config.cya, multiplier: priorDebrisMult };
     const baseLoss   = sunWeightedLoss(startDate, nowDate, baseParams);
     if (baseLoss <= 0) return;
+    // observed = how much MORE or LESS the pool burned vs debris-adjusted baseline
     const observed = actualLoss / baseLoss;
-    const newMult  = Math.min(3.5, Math.max(0.2, model.multiplier * 0.65 + observed * 0.35));
+    const newMult  = Math.min(6.0, Math.max(0.2, model.multiplier * 0.65 + observed * 0.35));
     const newModel = { multiplier: Math.round(newMult * 1000) / 1000, updated: new Date().toISOString() };
     setModel(newModel);
     store.set("decay-model", newModel);
@@ -335,8 +369,8 @@ export default function PoolApp() {
     const entry = { id: Date.now(), date: new Date().toISOString(), fc, predictedFC: pred?.fc ?? null, bathers: log.bathers, debris: log.debris ?? "none", notes: log.notes, uvIndex: weather?.uvIndex, tempF: weather?.tempF };
     const prior = meas.length > 0 ? meas[meas.length - 1] : null;
 
-    // Update decay model from prior → this measurement (strip bather demand)
-    updateDecayModel(prior, fc, log.bathers);
+    // Update decay model from prior → this measurement (strip bather + debris)
+    updateDecayModel(prior, fc, log.bathers, log.debris);
 
     // Save measurement
     const newMeas = [...meas, entry];
@@ -474,6 +508,105 @@ export default function PoolApp() {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
+  // DOSE WITHOUT TESTING
+  // ─────────────────────────────────────────────────────────────────────────
+  if (screen === "doseOnly") {
+    const pred_   = prediction();
+    const maxFC_  = config ? maxFCforCYA(config.cya) : 5;
+    const minFC_  = config ? minFCforCYA(config.cya) : 3;
+    const needed_ = pred_ ? Math.max(0, maxFC_ - pred_.fc) : 0;
+    const oz_     = doseOz(config.gallons, needed_, config.conc);
+    const [adjOz, setAdjOz] = useState(oz_);
+
+    // Hours until min after dosing (reuse same walk logic)
+    const shade_      = SHADE[config.shade]?.factor ?? 1.0;
+    const debrisMult_ = meas.length > 0 ? (DEBRIS_LEVELS[meas[meas.length-1].debris]?.mult ?? 1.0) : 1.0;
+    const params_     = { uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade_, cya: config.cya, multiplier: model.multiplier * debrisMult_ };
+    let hrsUntilMin_ = null;
+    for (let h = 1; h <= 96; h++) {
+      const t = new Date(Date.now() + h * 3600000);
+      if (round05(maxFC_ - sunWeightedLoss(new Date(), t, params_)) <= minFC_) { hrsUntilMin_ = h; break; }
+    }
+    const safeHrs_  = hrsUntilMin_ ?? 96;
+    const safeColor_= safeHrs_ >= 36 ? C.good : safeHrs_ >= 18 ? C.warn : C.danger;
+
+    return (
+      <div style={S.app}>
+        <FontLoader />
+        <div style={S.header}>
+          <div>
+            <div style={S.title}>CHLOR.IO</div>
+            <div style={S.sub}>Dose without testing</div>
+          </div>
+          <Btn ghost style={{ padding: "6px 12px", fontSize: "10px" }} onClick={() => setScreen("dashboard")}>Cancel</Btn>
+        </div>
+        <div style={S.content}>
+
+          <Card style={{ borderColor: `${C.accent}44` }}>
+            <Cap>PREDICTED CURRENT FC</Cap>
+            <div style={{ display: "flex", alignItems: "baseline", gap: "8px", marginBottom: "6px" }}>
+              <div style={{ ...S.bigNum, fontSize: "42px", color: C.accent }}>{pred_?.fc ?? "?"}</div>
+              <div style={{ color: C.muted, fontSize: "16px" }}>ppm</div>
+              <div style={{ color: C.muted, fontSize: "11px", marginLeft: "4px" }}>→ dose to {maxFC_} ppm</div>
+            </div>
+            <div style={{ fontSize: "10px", color: C.muted }}>
+              Based on {pred_?.dosed ? `dose to ${pred_?.dosedTo} ppm` : `measured ${pred_?.days}d ago`} · sun-weighted decay
+            </div>
+          </Card>
+
+          <Card>
+            <Cap>CHLORINE TO ADD</Cap>
+            <div style={{ display: "flex", alignItems: "baseline", gap: "10px", marginBottom: "8px" }}>
+              <div style={{ ...S.bigNum, fontSize: "42px", color: C.accent }}>{Math.round(adjOz * 10) / 10}</div>
+              <div style={{ color: C.muted, fontSize: "13px" }}>oz of {config.conc}% liquid chlorine</div>
+            </div>
+            <div style={{ fontSize: "11px", color: C.muted, marginBottom: "12px" }}>
+              = {(adjOz / 128).toFixed(2)} gal · raises {pred_?.fc} → {maxFC_} ppm
+            </div>
+            <Cap>ADJUST IF NEEDED</Cap>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "4px" }}>
+              {[oz_ * 0.75, oz_, oz_ * 1.25].map(v => (
+                <Btn key={v} primary={Math.abs(adjOz - v) < 0.5} ghost={Math.abs(adjOz - v) >= 0.5}
+                  onClick={() => setAdjOz(Math.round(v * 10) / 10)}>
+                  {Math.round(v * 10) / 10} oz
+                </Btn>
+              ))}
+            </div>
+            <input style={{ ...S.input, marginTop: "8px" }} type="number" step="0.5"
+              placeholder="Custom oz" value={adjOz}
+              onChange={e => setAdjOz(parseFloat(e.target.value) || 0)} />
+          </Card>
+
+          <Card style={{ borderColor: `${safeColor_}44` }}>
+            <Cap>AFTER DOSING TO {maxFC_} PPM</Cap>
+            <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+              <div>
+                <div style={{ fontSize: "24px", fontWeight: 700, color: safeColor_ }}>
+                  {safeHrs_ >= 96 ? "96+ hrs" : `~${safeHrs_} hrs`}
+                </div>
+                <div style={{ fontSize: "9px", color: C.muted, marginTop: "2px" }}>until below {minFC_} ppm</div>
+              </div>
+              <div style={{ fontSize: "11px", color: safeColor_ }}>
+                {safeHrs_ >= 36 ? "✓ You're set for the day" : safeHrs_ >= 18 ? "⚠ Dose again tomorrow" : "⚠ Consider adding more"}
+              </div>
+            </div>
+          </Card>
+
+          <div style={{ fontSize: "11px", color: C.warn, padding: "10px 14px", background: `${C.warn}10`, borderRadius: "8px", marginBottom: "12px" }}>
+            ⚡ The app will record this as an estimated entry. Test your actual FC every few days to keep predictions accurate.
+          </div>
+
+          <Btn primary style={{ width: "100%", padding: "14px", fontSize: "14px" }}
+            onClick={() => savePredictedDose(pred_?.fc ?? maxFC_, adjOz, maxFC_)}>
+            ✓ I Added {Math.round(adjOz * 10) / 10} oz — Update Predictions
+          </Btn>
+
+        </div>
+      </div>
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
   // LOADING
   // ─────────────────────────────────────────────────────────────────────────
   if (screen === "loading") return (
@@ -515,7 +648,7 @@ export default function PoolApp() {
         <input style={S.input} type="number" placeholder="Custom ppm" value={wiz.cya}
           onChange={e => setWiz(d => ({ ...d, cya: e.target.value }))} />
         <div style={{ marginTop: "10px", padding: "8px 12px", background: C.bg, borderRadius: "8px", fontSize: "11px", color: C.accent }}>
-          Safe FC range for CYA {wiz.cya || 0}: <strong>{minFC} – {maxFCforCYA(parseInt(wiz.cya) || 0)} ppm</strong>
+          Safe range: <strong>{minFC} – {maxFCforCYA(parseInt(wiz.cya) || 0)} ppm</strong> · SLAM level: <strong>{slamFCforCYA(parseInt(wiz.cya) || 0)} ppm</strong>
         </div>
       </>,
 
@@ -622,7 +755,14 @@ export default function PoolApp() {
             <div style={S.title}>CHLOR.IO</div>
             <div style={S.sub}>{config.city} · {config.gallons.toLocaleString()} gal · v{APP_VERSION}</div>
           </div>
-          <Btn ghost style={{ padding: "6px 12px", fontSize: "10px" }} onClick={() => setScreen("log")}>+ LOG FC</Btn>
+          <div style={{ display: "flex", gap: "6px" }}>
+            {pred && !pred.depleted && dose > 0 && (
+              <Btn primary style={{ padding: "6px 12px", fontSize: "10px" }} onClick={() => setScreen("doseOnly")}>
+                + DOSE
+              </Btn>
+            )}
+            <Btn ghost style={{ padding: "6px 12px", fontSize: "10px" }} onClick={() => setScreen("log")}>TEST & LOG</Btn>
+          </div>
         </div>
         <div style={S.content}>
 
@@ -635,18 +775,19 @@ export default function PoolApp() {
                   <div style={{ ...S.bigNum, fontSize: "52px", color: fcColor }}>{pred.fc}</div>
                   <div style={{ color: C.muted, fontSize: "18px", paddingBottom: "6px" }}>ppm</div>
                 </div>
-                <div style={{ marginTop: "8px", display: "flex", alignItems: "center", gap: "8px" }}>
+                <div style={{ marginTop: "8px", display: "flex", alignItems: "center", gap: "12px" }}>
                   <div style={{ fontSize: "11px", color: C.muted }}>safe range:</div>
                   <div style={{ fontSize: "11px" }}>
                     <span style={{ color: C.good }}>{minFC}</span>
                     <span style={{ color: C.muted }}> – </span>
                     <span style={{ color: C.accent }}>{maxFC} ppm</span>
                   </div>
+                  <div style={{ fontSize: "10px", color: C.muted }}>SLAM: {slamFCforCYA(config.cya)} ppm</div>
                 </div>
                 <div style={{ fontSize: "10px", color: C.muted, marginTop: "4px" }}>
                   {pred.dosed
-                    ? <>Dosed to <span style={{color:C.accent}}>{pred.dosedTo} ppm</span> · {pred.days}d ago · ~{pred.rate} ppm/sunny day</>
-                    : <>Measured {pred.days}d ago · ~{pred.rate} ppm/sunny day</>
+                    ? <>Dosed to <span style={{color:C.accent}}>{pred.dosedTo} ppm</span> · {pred.days}d ago · ~{pred.rate} ppm/day est.</>
+                    : <>Measured {pred.days}d ago · ~{pred.rate} ppm/day est.</>
                   }
                 </div>
                 <div style={{ marginTop: "10px", padding: "8px 12px", background: C.bg, borderRadius: "8px", fontSize: "11px", color: fcColor }}>
@@ -668,7 +809,7 @@ export default function PoolApp() {
             <Card style={{ borderColor: `${C.danger}66`, background: `${C.danger}08` }}>
               <Cap style={{ color: C.danger }}>TEST REQUIRED BEFORE DOSING</Cap>
               <div style={{ fontSize: "13px", color: C.text, marginBottom: "10px" }}>
-                The model has lost track of your chlorine level — it's estimated down to 0 ppm. Adding chlorine without a fresh reading risks over- or under-dosing.
+                The model has lost track of your chlorine level — it's estimated down to 0 ppm. Test your water before adding chlorine.
               </div>
               <div style={{ fontSize: "11px", color: C.muted, marginBottom: "14px" }}>
                 Test your water with a kit or strips, then log the result. The app will calculate the correct dose from that fresh reading.
@@ -687,8 +828,7 @@ export default function PoolApp() {
             const params      = { uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade, cya: config.cya, multiplier: model.multiplier * debrisMult };
             const now24       = new Date(Date.now() + 24 * 3600000);
             const now36       = new Date(Date.now() + 36 * 3600000);
-            const loss24      = sunWeightedLoss(new Date(), now24, params);
-            const loss36      = sunWeightedLoss(new Date(), now36, params);
+
             const fc24h       = Math.max(0, round05(maxFC - loss24));
             const fc36h       = Math.max(0, round05(maxFC - loss36));
             const ok24    = fc24h >= minFC;
@@ -710,20 +850,35 @@ export default function PoolApp() {
                 )}
                 <div style={{ marginTop: "12px", borderTop: `1px solid ${C.border}`, paddingTop: "10px" }}>
                   <Cap>PROJECTED AFTER DOSING</Cap>
-                  <div style={{ display: "flex", gap: "8px" }}>
-                    {[["Tomorrow", fc24h, ok24], ["+36 hrs", fc36h, ok36], ["Sunny day rate", pred.rate, true]].map(([lbl, val, ok]) => (
-                      <div key={lbl} style={{ flex: 1, background: C.bg, borderRadius: "8px", padding: "8px", textAlign: "center" }}>
-                        <div style={{ fontSize: "20px", fontWeight: 700, color: lbl === "Sunny day rate" ? C.text : ok ? C.good : C.danger }}>{val}</div>
-                        <div style={{ fontSize: "9px", color: C.muted, marginTop: "2px" }}>{lbl}</div>
-                        {lbl !== "Sunny day rate" && <div style={{ fontSize: "9px", color: ok ? C.good : C.danger, marginTop: "2px" }}>{ok ? "✓ safe" : "⚠ low"}</div>}
+                  {(() => {
+                    // Walk forward hour by hour to find when FC hits minFC
+                    let hrsUntilMin = null;
+                    const startFC = maxFC;
+                    for (let h = 1; h <= 96; h++) {
+                      const t = new Date(Date.now() + h * 3600000);
+                      const projected = round05(startFC - sunWeightedLoss(new Date(), t, params));
+                      if (projected <= minFC && hrsUntilMin === null) { hrsUntilMin = h; break; }
+                    }
+                    const safeForHrs = hrsUntilMin ?? 96;
+                    const safeColor  = safeForHrs >= 36 ? C.good : safeForHrs >= 18 ? C.warn : C.danger;
+                    const safeLabel  = safeForHrs >= 96 ? "96+ hrs" : `~${safeForHrs} hrs`;
+                    return (
+                      <div style={{ display: "flex", gap: "8px" }}>
+                        <div style={{ flex: 2, background: C.bg, borderRadius: "8px", padding: "10px", textAlign: "center" }}>
+                          <div style={{ fontSize: "26px", fontWeight: 700, color: safeColor }}>{safeLabel}</div>
+                          <div style={{ fontSize: "9px", color: C.muted, marginTop: "2px" }}>until below {minFC} ppm</div>
+                          <div style={{ fontSize: "9px", color: safeColor, marginTop: "3px" }}>
+                            {safeForHrs >= 36 ? "✓ comfortable window" : safeForHrs >= 18 ? "⚠ dose again tomorrow" : "⚠ consider dosing higher"}
+                          </div>
+                        </div>
+                        <div style={{ flex: 1, background: C.bg, borderRadius: "8px", padding: "10px", textAlign: "center" }}>
+                          <div style={{ fontSize: "20px", fontWeight: 700, color: C.muted }}>{pred.rate}</div>
+                          <div style={{ fontSize: "9px", color: C.muted, marginTop: "2px" }}>ppm</div>
+                          <div style={{ fontSize: "9px", color: C.muted, marginTop: "2px" }}>per day est.</div>
+                        </div>
                       </div>
-                    ))}
-                  </div>
-                  {(!ok24 || !ok36) && (
-                    <div style={{ marginTop: "8px", fontSize: "11px", color: C.warn, padding: "6px 10px", background: `${C.warn}15`, borderRadius: "6px" }}>
-                      ⚠ Consider dosing to {round05(maxFC + pred.rate * 1.5)} ppm to stay above {minFC} ppm for 36+ hrs
-                    </div>
-                  )}
+                    );
+                  })()}
                 </div>
               </Card>
             );
@@ -733,26 +888,35 @@ export default function PoolApp() {
             const shade       = SHADE[config.shade]?.factor ?? 1.0;
             const debrisMult  = meas.length > 0 ? (DEBRIS_LEVELS[meas[meas.length-1].debris]?.mult ?? 1.0) : 1.0;
             const params      = { uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade, cya: config.cya, multiplier: model.multiplier * debrisMult };
-            const now24       = new Date(Date.now() + 24 * 3600000);
-            const now36       = new Date(Date.now() + 36 * 3600000);
-            const fc24h       = Math.max(0, round05(pred.fc - sunWeightedLoss(new Date(), now24, params)));
-            const fc36h       = Math.max(0, round05(pred.fc - sunWeightedLoss(new Date(), now36, params)));
+
+            // Walk forward to find when current FC hits minFC
+            let hrsUntilMin = null;
+            for (let h = 1; h <= 96; h++) {
+              const t = new Date(Date.now() + h * 3600000);
+              const projected = round05(pred.fc - sunWeightedLoss(new Date(), t, params));
+              if (projected <= minFC && hrsUntilMin === null) { hrsUntilMin = h; break; }
+            }
+            const safeForHrs = hrsUntilMin ?? 96;
+            const safeColor  = safeForHrs >= 36 ? C.good : safeForHrs >= 18 ? C.warn : C.danger;
             return (
-              <Card style={{ borderColor: fc24h >= minFC ? `${C.good}44` : `${C.warn}44` }}>
+              <Card style={{ borderColor: safeForHrs >= 36 ? `${C.good}44` : `${C.warn}44` }}>
                 <div style={{ fontSize: "12px", color: C.good }}>✓ In safe range — no dose needed now</div>
                 <div style={{ display: "flex", gap: "8px", marginTop: "10px" }}>
-                  {[["Tomorrow", fc24h], ["+36 hrs", fc36h], ["Sunny day rate", pred.rate]].map(([lbl, val]) => (
-                    <div key={lbl} style={{ flex: 1, background: C.bg, borderRadius: "8px", padding: "8px", textAlign: "center" }}>
-                      <div style={{ fontSize: "20px", fontWeight: 700, color: lbl === "Sunny day rate" ? C.muted : val >= minFC ? C.good : C.warn }}>{val}</div>
-                      <div style={{ fontSize: "9px", color: C.muted, marginTop: "2px" }}>{lbl}</div>
+                  <div style={{ flex: 2, background: C.bg, borderRadius: "8px", padding: "10px", textAlign: "center" }}>
+                    <div style={{ fontSize: "26px", fontWeight: 700, color: safeColor }}>
+                      {safeForHrs >= 96 ? "96+ hrs" : `~${safeForHrs} hrs`}
                     </div>
-                  ))}
-                </div>
-                {fc36h < minFC && (
-                  <div style={{ marginTop: "8px", fontSize: "11px", color: C.warn, padding: "6px 10px", background: `${C.warn}15`, borderRadius: "6px" }}>
-                    ⚠ Will drop below {minFC} ppm within 36 hrs — dose to {maxFC} ppm tonight
+                    <div style={{ fontSize: "9px", color: C.muted, marginTop: "2px" }}>until below {minFC} ppm</div>
+                    <div style={{ fontSize: "9px", color: safeColor, marginTop: "3px" }}>
+                      {safeForHrs >= 36 ? "✓ no action needed" : "⚠ dose to " + maxFC + " ppm tonight"}
+                    </div>
                   </div>
-                )}
+                  <div style={{ flex: 1, background: C.bg, borderRadius: "8px", padding: "10px", textAlign: "center" }}>
+                    <div style={{ fontSize: "20px", fontWeight: 700, color: C.muted }}>{pred.rate}</div>
+                    <div style={{ fontSize: "9px", color: C.muted, marginTop: "2px" }}>ppm</div>
+                    <div style={{ fontSize: "9px", color: C.muted, marginTop: "2px" }}>per day est.</div>
+                  </div>
+                </div>
               </Card>
             );
           })()}
@@ -875,8 +1039,25 @@ export default function PoolApp() {
     const minFC  = config ? minFCforCYA(config.cya) : 1;
     const maxFC  = config ? maxFCforCYA(config.cya) : 5;
     const fcVal  = parseFloat(log.fc);
+
+    // Compute debris-aware prediction using the CURRENT log debris selection
+    const logDebrisMult = DEBRIS_LEVELS[log.debris]?.mult ?? 1.0;
+    const predDebrisAware = (() => {
+      if (!meas.length || !config) return null;
+      const last = meas[meas.length - 1];
+      const startDate = new Date(last.date);
+      const nowDate   = new Date();
+      const daysSince = (nowDate - startDate) / 86400000;
+      if (daysSince > 10) return null;
+      const baseFC  = last.effectiveFC ?? last.fc;
+      const shade   = SHADE[config.shade]?.factor ?? 1.0;
+      const params  = { uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade, cya: config.cya, multiplier: model.multiplier * logDebrisMult };
+      const loss    = sunWeightedLoss(startDate, nowDate, params);
+      return Math.max(0, round05(baseFC - loss));
+    })();
+
     const pred   = prediction();
-    const predFC = pred?.fc ?? null;
+    const predFC = predDebrisAware;
     const diff   = (predFC !== null && !isNaN(fcVal)) ? round05(fcVal - predFC) : null;
     const diffColor = diff === null ? C.muted : diff > 0.3 ? C.good : diff < -0.3 ? C.danger : C.warn;
     const diffLabel = diff === null ? null : diff > 0 ? `+${diff} above prediction` : diff < 0 ? `${diff} below prediction` : "matches prediction";
@@ -893,7 +1074,25 @@ export default function PoolApp() {
         </div>
         <div style={S.content}>
 
-          {/* Prediction comparison — shown when there is a prior prediction */}
+          {/* Debris selection — shown first so prediction reflects current conditions */}
+          <Card style={{ borderColor: log.debris !== "none" ? `${C.warn}55` : C.border }}>
+            <Cap>ORGANIC LOAD SINCE LAST TEST</Cap>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: log.debris !== "none" ? "8px" : "0" }}>
+              {Object.entries(DEBRIS_LEVELS).map(([k, v]) => (
+                <Btn key={k} primary={log.debris === k} ghost={log.debris !== k}
+                  onClick={() => setLog(d => ({ ...d, debris: k }))}>
+                  {v.label}
+                </Btn>
+              ))}
+            </div>
+            {log.debris !== "none" && (
+              <div style={{ fontSize: "10px", color: C.warn }}>
+                🍃 {DEBRIS_LEVELS[log.debris]?.desc} · prediction adjusted ×{DEBRIS_LEVELS[log.debris]?.mult}
+              </div>
+            )}
+          </Card>
+
+          {/* Prediction comparison — debris-aware, updates as you change debris selection */}
           {predFC !== null && (
             <Card style={{ borderColor: `${C.accent}33`, padding: "12px 16px" }}>
               <Cap>MODEL PREDICTED</Cap>
@@ -954,24 +1153,6 @@ export default function PoolApp() {
               ))}
             </div>
           </Card>
-          <Card>
-            <Cap>ORGANIC LOAD</Cap>
-            <div style={{ fontSize: "10px", color: C.muted, marginBottom: "8px" }}>Pollen, leaves, or debris since last test?</div>
-            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-              {Object.entries(DEBRIS_LEVELS).map(([k, v]) => (
-                <Btn key={k} primary={log.debris === k} ghost={log.debris !== k}
-                  onClick={() => setLog(d => ({ ...d, debris: k }))}>
-                  {v.label}
-                </Btn>
-              ))}
-            </div>
-            {log.debris !== "none" && (
-              <div style={{ fontSize: "10px", color: C.warn, marginTop: "8px" }}>
-                {DEBRIS_LEVELS[log.debris]?.desc} · ×{DEBRIS_LEVELS[log.debris]?.mult} decay applied to projections
-              </div>
-            )}
-          </Card>
-
           <Card>
             <Cap>NOTES (OPTIONAL)</Cap>
             <input style={S.input} type="text" placeholder="Rain, shock, pool party…"
@@ -1034,11 +1215,26 @@ export default function PoolApp() {
                 <div style={{ ...S.bigNum, fontSize: "28px", color: C.accent }}>×{model.multiplier.toFixed(2)}</div>
                 <div style={{ fontSize: "11px", color: C.muted }}>vs baseline</div>
               </div>
-              <div style={{ fontSize: "11px", color: C.muted, marginTop: "6px" }}>
-                {model.multiplier > 1.2 ? "Your pool uses chlorine faster than average. Check for algae, high phosphates, or heavy debris." :
-                 model.multiplier < 0.85 ? "Your pool retains chlorine well." :
-                 "Chlorine consumption is within normal range."}
-              </div>
+              {(() => {
+                const lastDebris = meas.length > 0 ? (meas[meas.length-1].debris ?? "none") : "none";
+                const debrisActive = lastDebris !== "none";
+                let msg, color = C.muted;
+                if (model.multiplier > 1.2 && debrisActive) {
+                  msg = `Elevated consumption is expected — ${DEBRIS_LEVELS[lastDebris]?.label} logged. If decay stays high after pollen season ends, test for phosphates.`;
+                } else if (model.multiplier > 4.0) {
+                  msg = "Very high consumption with no debris logged. Test your combined chlorine (CC) — if CC is above 0.5 ppm, a SLAM may be needed.";
+                  color = C.warn;
+                } else if (model.multiplier > 1.2) {
+                  msg = "Higher than average consumption with no debris logged. Test your combined chlorine (CC) to rule out contamination.";
+                  color = C.warn;
+                } else if (model.multiplier < 0.85) {
+                  msg = "Your pool retains chlorine well.";
+                  color = C.good;
+                } else {
+                  msg = "Chlorine consumption is within normal range.";
+                }
+                return <div style={{ fontSize: "11px", color, marginTop: "6px" }}>{msg}</div>;
+              })()}
               {model.updated && <div style={{ fontSize: "9px", color: C.muted, marginTop: "6px" }}>Last calibrated {new Date(model.updated).toLocaleDateString()}</div>}
             </Card>
           )}
@@ -1047,10 +1243,10 @@ export default function PoolApp() {
           ) : sorted.map(m => {
             const color = m.fc >= minFC ? C.good : C.danger;
             return (
-              <div key={m.id} style={{ ...S.card, display: "flex", gap: "14px", alignItems: "center", marginBottom: "8px" }}>
+              <div key={m.id} style={{ ...S.card, display: "flex", gap: "14px", alignItems: "center", marginBottom: "8px", borderColor: m.estimated ? `${C.warn}44` : C.border }}>
                 <div style={{ textAlign: "center", minWidth: "48px" }}>
                   <div style={{ fontSize: "22px", fontWeight: 700, color, lineHeight: 1 }}>{m.fc}</div>
-                  <div style={{ fontSize: "9px", color: C.muted, marginTop: "2px" }}>ppm FC</div>
+                  <div style={{ fontSize: "9px", color: m.estimated ? C.warn : C.muted, marginTop: "2px" }}>{m.estimated ? "est." : "ppm FC"}</div>
                 </div>
                 <div style={{ flex: 1 }}>
                   <div style={{ fontSize: "12px" }}>{new Date(m.date).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}</div>
@@ -1119,6 +1315,7 @@ export default function PoolApp() {
                 ["Volume",       `${config.gallons.toLocaleString()} gallons`],
                 ["CYA",          `${config.cya} ppm`],
                 ["FC range",     `${minFCforCYA(config.cya)} – ${maxFCforCYA(config.cya)} ppm`],
+                ["SLAM level",   `${slamFCforCYA(config.cya)} ppm`],
                 ["Sun exposure", SHADE[config.shade].label],
                 ["Location",     `${config.city}`],
                 ["Product",      `${config.conc}% liquid chlorine`],
