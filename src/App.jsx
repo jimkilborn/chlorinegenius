@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 
 // ─── Version ─────────────────────────────────────────────────────────────────
-const APP_VERSION = "1.2.4";
+const APP_VERSION = "1.2.5";
 
 // ─── Fonts ────────────────────────────────────────────────────────────────────
 const FontLoader = () => {
@@ -238,6 +238,7 @@ export default function PoolApp() {
 
   // Dose-only screen state (hoisted — useState cannot live inside conditionals)
   const [adjOz, setAdjOz] = useState(0);
+  const [showDoseModal, setShowDoseModal] = useState(false);
 
   // ── Boot ──────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -768,7 +769,15 @@ export default function PoolApp() {
             <div style={S.title}>CHLOR.IO</div>
             <div style={S.sub}>{config.city} · {config.gallons.toLocaleString()} gal · v{APP_VERSION}</div>
           </div>
-          <Btn ghost style={{ padding: "6px 12px", fontSize: "10px" }} onClick={() => setScreen("log")}>TEST & LOG</Btn>
+          <div style={{ display: "flex", gap: "6px" }}>
+            {pred && !pred.depleted && (
+              <Btn primary style={{ padding: "6px 14px", fontSize: "11px", fontWeight: 700 }}
+                onClick={() => { setAdjOz(dose); setShowDoseModal(true); }}>
+                DOSE
+              </Btn>
+            )}
+            <Btn ghost style={{ padding: "6px 12px", fontSize: "10px" }} onClick={() => setScreen("log")}>LOG</Btn>
+          </div>
         </div>
         <div style={S.content}>
 
@@ -809,43 +818,6 @@ export default function PoolApp() {
               </>
             )}
           </Card>
-
-          {/* Primary action — dose without testing */}
-          {pred && !pred.depleted && (
-            <Card style={{ borderColor: dose > 0 ? `${C.accent}66` : `${C.good}44`, background: dose > 0 ? `${C.accent}08` : `${C.good}05` }}>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
-                <div>
-                  <div style={{ fontSize: "12px", color: C.muted, marginBottom: "4px" }}>
-                    {dose > 0 ? "TONIGHT'S DOSE" : "NO DOSE NEEDED"}
-                  </div>
-                  {dose > 0 ? (
-                    <>
-                      <div style={{ display: "flex", alignItems: "baseline", gap: "6px" }}>
-                        <span style={{ ...S.bigNum, fontSize: "32px", color: C.accent }}>{dose}</span>
-                        <span style={{ fontSize: "12px", color: C.muted }}>oz of {config.conc}%</span>
-                      </div>
-                      <div style={{ fontSize: "10px", color: C.muted, marginTop: "2px" }}>
-                        raises ~{pred.fc} → {maxFC} ppm
-                      </div>
-                    </>
-                  ) : (
-                    <div style={{ fontSize: "13px", color: C.good }}>✓ Already at target</div>
-                  )}
-                </div>
-                {dose > 0 ? (
-                  <Btn primary style={{ flexShrink: 0, padding: "12px 16px", fontSize: "13px", fontWeight: 700 }}
-                    onClick={() => { setAdjOz(dose); setScreen("doseOnly"); }}>
-                    + DOSE
-                  </Btn>
-                ) : (
-                  <Btn ghost style={{ flexShrink: 0, padding: "10px 14px", fontSize: "11px" }}
-                    onClick={() => { setAdjOz(0); setScreen("doseOnly"); }}>
-                    Log dose
-                  </Btn>
-                )}
-              </div>
-            </Card>
-          )}
 
           {/* Depleted — require fresh test */}
           {pred?.depleted && (
@@ -1079,6 +1051,42 @@ export default function PoolApp() {
           </div>
         </div>
         <Nav />
+
+        {/* Dose modal */}
+        {showDoseModal && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(7,14,28,0.85)", display: "flex", alignItems: "flex-end", zIndex: 100 }}
+            onClick={() => setShowDoseModal(false)}>
+            <div style={{ width: "100%", background: C.panel, borderTop: `1px solid ${C.border}`, borderRadius: "16px 16px 0 0", padding: "24px 20px 40px" }}
+              onClick={e => e.stopPropagation()}>
+
+              {/* Handle bar */}
+              <div style={{ width: "40px", height: "4px", background: C.border, borderRadius: "2px", margin: "0 auto 20px" }} />
+
+              <div style={{ fontSize: "13px", color: C.muted, marginBottom: "6px" }}>Tonight's dose</div>
+              <div style={{ display: "flex", alignItems: "baseline", gap: "8px", marginBottom: "20px" }}>
+                <span style={{ ...S.bigNum, fontSize: "44px", color: C.accent }}>{dose > 0 ? dose : 0}</span>
+                <span style={{ color: C.muted, fontSize: "14px" }}>oz of {config.conc}% · raises to {maxFC} ppm</span>
+              </div>
+
+              {/* Option 1 — just dose */}
+              <Btn primary style={{ width: "100%", padding: "16px", fontSize: "15px", fontWeight: 700, marginBottom: "10px" }}
+                onClick={() => { setShowDoseModal(false); setScreen("doseOnly"); }}>
+                Dose now — no test needed
+              </Btn>
+
+              {/* Option 2 — test first */}
+              <Btn ghost style={{ width: "100%", padding: "14px", fontSize: "13px" }}
+                onClick={() => { setShowDoseModal(false); setScreen("log"); }}>
+                Test first, then dose
+              </Btn>
+
+              <div style={{ fontSize: "10px", color: C.muted, textAlign: "center", marginTop: "12px" }}>
+                Tap outside to cancel
+              </div>
+            </div>
+          </div>
+        )}
+
       </div>
     );
   }
