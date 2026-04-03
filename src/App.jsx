@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 
 // ─── Version ─────────────────────────────────────────────────────────────────
-const APP_VERSION = "1.2.2";
+const APP_VERSION = "1.2.3";
 
 // ─── Fonts ────────────────────────────────────────────────────────────────────
 const FontLoader = () => {
@@ -235,6 +235,9 @@ export default function PoolApp() {
   // Settings screen state (hoisted to avoid React hooks-in-conditional bug)
   const [heaterOn,   setHeaterOn]   = useState(() => false);
   const [heaterTemp, setHeaterTemp] = useState(() => 88);
+
+  // Dose-only screen state (hoisted — useState cannot live inside conditionals)
+  const [adjOz, setAdjOz] = useState(0);
 
   // ── Boot ──────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -528,8 +531,6 @@ export default function PoolApp() {
     const minFC_  = config ? minFCforCYA(config.cya) : 3;
     const needed_ = pred_ ? Math.max(0, maxFC_ - pred_.fc) : 0;
     const oz_     = doseOz(config.gallons, needed_, config.conc);
-    const [adjOz, setAdjOz] = useState(oz_);
-
     // Hours until min after dosing (reuse same walk logic)
     const shade_      = SHADE[config.shade]?.factor ?? 1.0;
     const debrisMult_ = meas.length > 0 ? organicMult(meas[meas.length-1].pollen ?? 'none', meas[meas.length-1].debris ?? 'none') : 1.0;
@@ -769,7 +770,7 @@ export default function PoolApp() {
           </div>
           <div style={{ display: "flex", gap: "6px" }}>
             {pred && !pred.depleted && dose > 0 && (
-              <Btn primary style={{ padding: "6px 12px", fontSize: "10px" }} onClick={() => setScreen("doseOnly")}>
+              <Btn primary style={{ padding: "6px 12px", fontSize: "10px" }} onClick={() => { setAdjOz(dose); setScreen("doseOnly"); }}>
                 + DOSE
               </Btn>
             )}
