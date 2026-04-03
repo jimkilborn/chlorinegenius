@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 
 // ─── Version ─────────────────────────────────────────────────────────────────
-const APP_VERSION = "1.2.5";
+const APP_VERSION = "1.2.6";
 
 // ─── Fonts ────────────────────────────────────────────────────────────────────
 const FontLoader = () => {
@@ -769,15 +769,12 @@ export default function PoolApp() {
             <div style={S.title}>CHLOR.IO</div>
             <div style={S.sub}>{config.city} · {config.gallons.toLocaleString()} gal · v{APP_VERSION}</div>
           </div>
-          <div style={{ display: "flex", gap: "6px" }}>
-            {pred && !pred.depleted && (
-              <Btn primary style={{ padding: "6px 14px", fontSize: "11px", fontWeight: 700 }}
-                onClick={() => { setAdjOz(dose); setShowDoseModal(true); }}>
-                DOSE
-              </Btn>
-            )}
-            <Btn ghost style={{ padding: "6px 12px", fontSize: "10px" }} onClick={() => setScreen("log")}>LOG</Btn>
-          </div>
+          {pred && !pred.depleted && (
+            <Btn primary style={{ padding: "6px 16px", fontSize: "12px", fontWeight: 700 }}
+              onClick={() => { setAdjOz(dose); setShowDoseModal(true); }}>
+              DOSE
+            </Btn>
+          )}
         </div>
         <div style={S.content}>
 
