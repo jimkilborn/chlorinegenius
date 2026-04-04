@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 
 // ─── Version ─────────────────────────────────────────────────────────────────
-const APP_VERSION = "1.2.8";
+const APP_VERSION = "1.2.9";
 
 // ─── Fonts ────────────────────────────────────────────────────────────────────
 const FontLoader = () => {
@@ -1149,8 +1149,9 @@ export default function PoolApp() {
     const maxFC  = config ? maxFCforCYA(config.cya) : 5;
     const fcVal  = parseFloat(log.fc);
 
-    // Compute debris-aware prediction using the CURRENT log debris selection
-    const logDebrisMult = organicMult(log.pollen ?? 'none', log.debris ?? 'none');
+    // Compute conditions-aware prediction using CURRENT log selections
+    const logDebrisMult  = organicMult(log.pollen ?? 'none', log.debris ?? 'none');
+    const logBatherPpm   = BATHER_PPM[log.bathers] ?? 0;
     const predDebrisAware = (() => {
       if (!meas.length || !config) return null;
       const last = meas[meas.length - 1];
@@ -1158,11 +1159,26 @@ export default function PoolApp() {
       const nowDate   = new Date();
       const daysSince = (nowDate - startDate) / 86400000;
       if (daysSince > 10) return null;
-      const baseFC  = last.effectiveFC ?? last.fc;
-      const shade   = SHADE[config.shade]?.factor ?? 1.0;
-      const params  = { uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade, cya: config.cya, multiplier: model.multiplier * logDebrisMult };
-      const loss    = sunWeightedLoss(startDate, nowDate, params);
-      return { fc: Math.max(0, Math.round((baseFC - loss) * 10) / 10), loss: Math.round(loss * 100) / 100 };
+      const baseFC    = last.effectiveFC ?? last.fc;
+      const shade     = SHADE[config.shade]?.factor ?? 1.0;
+      // Step 1: base decay (no organic/bather adjustment)
+      const baseParams  = { uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade, cya: config.cya, multiplier: model.multiplier };
+      const baseLoss    = sunWeightedLoss(startDate, nowDate, baseParams);
+      const baseFC_pred = Math.max(0, Math.round((baseFC - baseLoss) * 10) / 10);
+      // Step 2: organic multiplier adds extra loss
+      const adjustedParams = { ...baseParams, multiplier: model.multiplier * logDebrisMult };
+      const adjustedLoss   = sunWeightedLoss(startDate, nowDate, adjustedParams);
+      const organicExtra   = Math.round((adjustedLoss - baseLoss) * 100) / 100;
+      const afterOrganic   = Math.max(0, Math.round((baseFC - adjustedLoss) * 10) / 10);
+      // Step 3: bather demand on top
+      const afterBathers   = Math.max(0, Math.round((afterOrganic - logBatherPpm) * 10) / 10);
+      return {
+        fc: afterBathers,
+        basePred: baseFC_pred,
+        organicExtra: Math.round(organicExtra * 10) / 10,
+        batherPpm: logBatherPpm,
+        loss: Math.round(adjustedLoss * 100) / 100,
+      };
     })();
 
     const pred   = prediction();
@@ -1184,8 +1200,8 @@ export default function PoolApp() {
         </div>
         <div style={S.content}>
 
-          {/* Pollen + Debris — shown first so prediction updates live */}
-          <Card style={{ borderColor: (log.pollen !== "none" || log.debris !== "none") ? `${C.warn}55` : C.border }}>
+          {/* Conditions — pollen, debris, bathers all in one card */}
+          <Card style={{ borderColor: (log.pollen !== "none" || log.debris !== "none" || log.bathers > 0) ? `${C.warn}55` : C.border }}>
             <Cap>CONDITIONS SINCE LAST TEST</Cap>
 
             <div style={{ fontSize: "9px", color: C.muted, letterSpacing: "1.5px", textTransform: "uppercase", marginBottom: "6px" }}>Pollen</div>
@@ -1199,7 +1215,7 @@ export default function PoolApp() {
             </div>
 
             <div style={{ fontSize: "9px", color: C.muted, letterSpacing: "1.5px", textTransform: "uppercase", marginBottom: "6px" }}>Leaves / Debris</div>
-            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: (log.pollen !== "none" || log.debris !== "none") ? "10px" : "0" }}>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "12px" }}>
               {Object.entries(DEBRIS_LEVELS).map(([k, v]) => (
                 <Btn key={k} primary={log.debris === k} ghost={log.debris !== k}
                   onClick={() => setLog(d => ({ ...d, debris: k }))}>
@@ -1208,21 +1224,31 @@ export default function PoolApp() {
               ))}
             </div>
 
-            {(log.pollen !== "none" || log.debris !== "none") && (
-              <div style={{ fontSize: "10px", color: C.warn }}>
-                Combined organic load ×{organicMult(log.pollen, log.debris).toFixed(2)} · prediction updated above ↑
+            <div style={{ fontSize: "9px", color: C.muted, letterSpacing: "1.5px", textTransform: "uppercase", marginBottom: "6px" }}>Bather Load</div>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: (log.pollen !== "none" || log.debris !== "none" || log.bathers > 0) ? "10px" : "0" }}>
+              {[{ v: 0, l: "None" }, { v: 1, l: "Light" }, { v: 3, l: "Moderate" }, { v: 6, l: "Heavy" }].map(({ v, l }) => (
+                <Btn key={v} primary={log.bathers === v} ghost={log.bathers !== v} onClick={() => setLog(d => ({ ...d, bathers: v }))}>{l}</Btn>
+              ))}
+            </div>
+
+            {(log.pollen !== "none" || log.debris !== "none" || log.bathers > 0) && (
+              <div style={{ fontSize: "10px", color: C.warn, marginTop: "2px" }}>
+                {[
+                  (log.pollen !== "none" || log.debris !== "none") && `organic ×${organicMult(log.pollen, log.debris).toFixed(2)}`,
+                  log.bathers > 0 && `-${BATHER_PPM[log.bathers]} ppm bather demand`,
+                ].filter(Boolean).join(" · ")} · prediction adjusted below ↓
               </div>
             )}
           </Card>
 
-          {/* Prediction comparison — debris-aware, updates live as you change pollen/debris */}
+          {/* Prediction comparison — updates live as conditions change */}
           {predFC !== null && (
             <Card style={{ borderColor: `${C.accent}33`, padding: "12px 16px" }}>
-              <Cap>MODEL PREDICTED</Cap>
+              <Cap>ADJUSTED PREDICTION</Cap>
               <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
                 <div style={{ textAlign: "center" }}>
                   <div style={{ ...S.bigNum, fontSize: "36px", color: C.accent }}>{predFC}</div>
-                  <div style={{ fontSize: "9px", color: C.muted, marginTop: "2px" }}>predicted ppm</div>
+                  <div style={{ fontSize: "9px", color: C.muted, marginTop: "2px" }}>adjusted ppm</div>
                 </div>
                 {!isNaN(fcVal) && log.fc !== "" && (
                   <>
@@ -1242,20 +1268,31 @@ export default function PoolApp() {
                   </>
                 )}
               </div>
-              <div style={{ marginTop: "10px", display: "flex", gap: "8px" }}>
-                <div style={{ flex: 1, background: C.bg, borderRadius: "6px", padding: "6px 8px", textAlign: "center" }}>
-                  <div style={{ fontSize: "13px", fontWeight: 600, color: C.text }}>-{predLoss}</div>
-                  <div style={{ fontSize: "9px", color: C.muted, marginTop: "1px" }}>ppm lost</div>
+
+              {/* Breakdown rows */}
+              <div style={{ marginTop: "10px", display: "flex", flexDirection: "column", gap: "4px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", padding: "5px 8px", background: C.bg, borderRadius: "6px" }}>
+                  <span style={{ color: C.muted }}>Base decay</span>
+                  <span style={{ color: C.text }}>{predDebrisAware.basePred} ppm</span>
                 </div>
-                <div style={{ flex: 1, background: C.bg, borderRadius: "6px", padding: "6px 8px", textAlign: "center" }}>
-                  <div style={{ fontSize: "13px", fontWeight: 600, color: logDebrisMult > 1 ? C.warn : C.muted }}>×{(model.multiplier * logDebrisMult).toFixed(2)}</div>
-                  <div style={{ fontSize: "9px", color: C.muted, marginTop: "1px" }}>effective mult</div>
-                </div>
-                <div style={{ flex: 1, background: C.bg, borderRadius: "6px", padding: "6px 8px", textAlign: "center" }}>
-                  <div style={{ fontSize: "13px", fontWeight: 600, color: C.text }}>{round05(predFC)}</div>
-                  <div style={{ fontSize: "9px", color: C.muted, marginTop: "1px" }}>rounded est.</div>
+                {predDebrisAware.organicExtra > 0 && (
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", padding: "5px 8px", background: C.bg, borderRadius: "6px" }}>
+                    <span style={{ color: C.warn }}>Organic load ×{(model.multiplier * logDebrisMult).toFixed(2)}</span>
+                    <span style={{ color: C.warn }}>−{predDebrisAware.organicExtra} ppm</span>
+                  </div>
+                )}
+                {predDebrisAware.batherPpm > 0 && (
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", padding: "5px 8px", background: C.bg, borderRadius: "6px" }}>
+                    <span style={{ color: C.warn }}>Bather demand</span>
+                    <span style={{ color: C.warn }}>−{predDebrisAware.batherPpm} ppm</span>
+                  </div>
+                )}
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", fontWeight: 600, padding: "5px 8px", background: `${C.accent}15`, borderRadius: "6px" }}>
+                  <span style={{ color: C.accent }}>Adjusted estimate</span>
+                  <span style={{ color: C.accent }}>{predFC} ppm</span>
                 </div>
               </div>
+
               {pred?.dosed && (
                 <div style={{ fontSize: "10px", color: C.muted, marginTop: "8px" }}>
                   Based on {pred.dosedTo} ppm after last dose · sun-weighted decay
@@ -1281,14 +1318,6 @@ export default function PoolApp() {
                 )}
               </>
             )}
-          </Card>
-          <Card>
-            <Cap>BATHER LOAD</Cap>
-            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-              {[{ v: 0, l: "None" }, { v: 1, l: "Light" }, { v: 3, l: "Moderate" }, { v: 6, l: "Heavy" }].map(({ v, l }) => (
-                <Btn key={v} primary={log.bathers === v} ghost={log.bathers !== v} onClick={() => setLog(d => ({ ...d, bathers: v }))}>{l}</Btn>
-              ))}
-            </div>
           </Card>
           <Card>
             <Cap>NOTES (OPTIONAL)</Cap>
