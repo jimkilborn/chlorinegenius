@@ -210,14 +210,19 @@ const makeStyles = (C) => ({
   navBtn: { flex: 1, background: "none", border: "none", cursor: "pointer", fontFamily: "'IBM Plex Mono', monospace", fontSize: "9px", letterSpacing: "1.5px", textTransform: "uppercase", padding: "6px 0" },
 });
 
+let C = PALETTES.dark;
+let S = makeStyles(C);
+
+const Btn  = ({ primary, ghost, style = {}, ...p }) => <button style={{ ...S.btn, ...(primary ? S.primary : ghost ? S.ghost : {}), ...style }} {...p} />;
+const Card = ({ style = {}, ...p }) => <div style={{ ...S.card, ...style }} {...p} />;
+const Cap  = (p) => <div style={S.cap} {...p} />;
+
 // ─── App ──────────────────────────────────────────────────────────────────────
 export default function PoolApp() {
   const [lightMode, setLightMode] = useState(() => store.get("light-mode") ?? false);
-  const C   = PALETTES[lightMode ? "light" : "dark"];
-  const S   = makeStyles(C);
-  const Btn  = ({ primary, ghost, style = {}, ...p }) => <button style={{ ...S.btn, ...(primary ? S.primary : ghost ? S.ghost : {}), ...style }} {...p} />;
-  const Card = ({ style = {}, ...p }) => <div style={{ ...S.card, ...style }} {...p} />;
-  const Cap  = (p) => <div style={S.cap} {...p} />;
+  // Update module-level C/S before any JSX renders (render is synchronous, single instance)
+  C = PALETTES[lightMode ? "light" : "dark"];
+  S = makeStyles(C);
   const [screen,  setScreen]  = useState("loading");
   const [config,  setConfig]  = useState(null);
   const [meas,    setMeas]    = useState([]);
