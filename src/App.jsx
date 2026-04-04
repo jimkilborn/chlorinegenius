@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 
 // ─── Version ─────────────────────────────────────────────────────────────────
-const APP_VERSION = "1.2.6";
+const APP_VERSION = "1.2.8";
 
 // ─── Fonts ────────────────────────────────────────────────────────────────────
 const FontLoader = () => {
@@ -179,13 +179,21 @@ async function fetchWeather(lat, lon) {
 }
 
 // ─── Design tokens ────────────────────────────────────────────────────────────
-const C = {
-  bg: "#070e1c", panel: "#0c1525", border: "#162338",
-  accent: "#00d4e8", accentLo: "#00526b",
-  text: "#cce4ef", muted: "#4e6e82",
-  good: "#00e088", warn: "#ffb820", danger: "#ff3f5e",
+const PALETTES = {
+  dark: {
+    bg: "#070e1c", panel: "#0c1525", border: "#162338",
+    accent: "#00d4e8", accentLo: "#00526b",
+    text: "#cce4ef", muted: "#4e6e82",
+    good: "#00e088", warn: "#ffb820", danger: "#ff3f5e",
+  },
+  light: {
+    bg: "#f0f5fa", panel: "#ffffff", border: "#cddaea",
+    accent: "#0099b0", accentLo: "#b8dce6",
+    text: "#162030", muted: "#6a8aa0",
+    good: "#007a40", warn: "#b06a00", danger: "#c41e3a",
+  },
 };
-const S = {
+const makeStyles = (C) => ({
   app:    { minHeight: "100vh", background: C.bg, color: C.text, fontFamily: "'IBM Plex Mono', monospace", paddingBottom: "72px" },
   header: { padding: "18px 20px 14px", borderBottom: `1px solid ${C.border}`, background: C.panel, display: "flex", alignItems: "center", justifyContent: "space-between" },
   title:  { fontFamily: "'Syne', sans-serif", fontSize: "21px", fontWeight: 800, color: C.accent, letterSpacing: "-0.5px", margin: 0 },
@@ -196,18 +204,20 @@ const S = {
   bigNum: { fontFamily: "'Syne', sans-serif", fontWeight: 800, lineHeight: 1 },
   input:  { width: "100%", background: C.bg, border: `1px solid ${C.border}`, borderRadius: "8px", padding: "10px 12px", color: C.text, fontFamily: "'IBM Plex Mono', monospace", fontSize: "14px", outline: "none", boxSizing: "border-box" },
   btn:    { display: "inline-flex", alignItems: "center", justifyContent: "center", padding: "9px 18px", borderRadius: "8px", border: "none", cursor: "pointer", fontFamily: "'IBM Plex Mono', monospace", fontSize: "12px", fontWeight: 600, transition: "opacity 0.15s" },
-  primary:{ background: C.accent, color: C.bg },
+  primary:{ background: C.accent, color: C.panel },
   ghost:  { background: "transparent", color: C.accent, border: `1px solid ${C.accentLo}` },
   nav:    { position: "fixed", bottom: 0, left: 0, right: 0, background: C.panel, borderTop: `1px solid ${C.border}`, display: "flex", padding: "8px 0 18px" },
   navBtn: { flex: 1, background: "none", border: "none", cursor: "pointer", fontFamily: "'IBM Plex Mono', monospace", fontSize: "9px", letterSpacing: "1.5px", textTransform: "uppercase", padding: "6px 0" },
-};
-
-const Btn  = ({ primary, ghost, style = {}, ...p }) => <button style={{ ...S.btn, ...(primary ? S.primary : ghost ? S.ghost : {}), ...style }} {...p} />;
-const Card = ({ style = {}, ...p }) => <div style={{ ...S.card, ...style }} {...p} />;
-const Cap  = (p) => <div style={S.cap} {...p} />;
+});
 
 // ─── App ──────────────────────────────────────────────────────────────────────
 export default function PoolApp() {
+  const [lightMode, setLightMode] = useState(() => store.get("light-mode") ?? false);
+  const C   = PALETTES[lightMode ? "light" : "dark"];
+  const S   = makeStyles(C);
+  const Btn  = ({ primary, ghost, style = {}, ...p }) => <button style={{ ...S.btn, ...(primary ? S.primary : ghost ? S.ghost : {}), ...style }} {...p} />;
+  const Card = ({ style = {}, ...p }) => <div style={{ ...S.card, ...style }} {...p} />;
+  const Cap  = (p) => <div style={S.cap} {...p} />;
   const [screen,  setScreen]  = useState("loading");
   const [config,  setConfig]  = useState(null);
   const [meas,    setMeas]    = useState([]);
@@ -279,8 +289,9 @@ export default function PoolApp() {
     const ratePerDay  = calcDecayPerDay(params);
     const fc          = Math.max(0, round05(baseFC - loss));
     const depleted    = fc <= 0;
+    const staleness   = daysSince >= 4 ? 'lockout' : daysSince >= 2 ? 'caution' : 'fresh';
     return {
-      fc, depleted,
+      fc, depleted, staleness,
       days:    Math.round(daysSince * 10) / 10,
       rate:    ratePerDay,
       dosed:   !!last.effectiveFC,
@@ -816,24 +827,61 @@ export default function PoolApp() {
             )}
           </Card>
 
-          {/* Depleted — require fresh test */}
+          {/* Staleness warning / lockout */}
+          {pred?.staleness === 'caution' && !pred.depleted && (
+            <Card style={{ borderColor: `${C.warn}66`, background: `${C.warn}08` }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+                <span style={{ fontSize: '18px' }}>⚠️</span>
+                <Cap style={{ color: C.warn, marginBottom: 0 }}>ESTIMATE MAY BE DRIFTING</Cap>
+              </div>
+              <div style={{ fontSize: '13px', color: C.text, marginBottom: '8px' }}>
+                It's been <strong>{pred.days} days</strong> since your last test. The projection is still shown but accuracy decreases over time — test today to recalibrate.
+              </div>
+              <Btn primary onClick={() => setScreen('log')} style={{ width: '100%' }}>
+                Test &amp; Log FC Now →
+              </Btn>
+            </Card>
+          )}
+
+          {pred?.staleness === 'lockout' && !pred.depleted && (
+            <Card style={{ borderColor: `${C.danger}66`, background: `${C.danger}08` }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+                <span style={{ fontSize: '18px' }}>🔒</span>
+                <Cap style={{ color: C.danger, marginBottom: 0 }}>TEST REQUIRED — DOSE HIDDEN</Cap>
+              </div>
+              <div style={{ fontSize: '13px', color: C.text, marginBottom: '6px' }}>
+                It's been <strong>{pred.days} days</strong> since your last test. Too much can change in that time — rain, bather load, algae — so dose recommendations are paused.
+              </div>
+              <div style={{ fontSize: '11px', color: C.muted, marginBottom: '12px' }}>
+                Test your water, log the result, and the app will calculate the correct dose from that fresh reading.
+              </div>
+              <Btn primary onClick={() => setScreen('log')} style={{ width: '100%' }}>
+                Test &amp; Log FC Now →
+              </Btn>
+            </Card>
+          )}
+
+          {/* Depleted / FC reached zero — lockout */}
           {pred?.depleted && (
             <Card style={{ borderColor: `${C.danger}66`, background: `${C.danger}08` }}>
-              <Cap style={{ color: C.danger }}>TEST REQUIRED BEFORE DOSING</Cap>
-              <div style={{ fontSize: "13px", color: C.text, marginBottom: "10px" }}>
-                The model has lost track of your chlorine level — it's estimated down to 0 ppm. Test your water before adding chlorine.
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+                <span style={{ fontSize: '18px' }}>🔒</span>
+                <Cap style={{ color: C.danger, marginBottom: 0 }}>TEST REQUIRED — DOSE HIDDEN</Cap>
               </div>
-              <div style={{ fontSize: "11px", color: C.muted, marginBottom: "14px" }}>
-                Test your water with a kit or strips, then log the result. The app will calculate the correct dose from that fresh reading.
+              <div style={{ fontSize: '13px', color: C.text, marginBottom: '6px' }}>
+                Estimated FC has reached <strong>0 ppm</strong> — the model can no longer predict accurately. Test your water before adding chlorine.
               </div>
-              <Btn primary style={{ width: "100%" }} onClick={() => setScreen("log")}>
-                Test & Log FC Now →
+              <div style={{ fontSize: '11px', color: C.muted, marginBottom: '12px' }}>
+                Log a fresh measurement and the app will calculate the correct dose from that reading.
+              </div>
+              <Btn primary onClick={() => setScreen('log')} style={{ width: '100%' }}>
+                Test &amp; Log FC Now →
               </Btn>
             </Card>
           )}
 
           {/* Dose recommendation */}
-          {pred && !pred.depleted && needed > 0.05 && (() => {
+          {pred && !pred.depleted && pred.staleness !== 'lockout' && needed > 0.05 && (() => {
             // Project forward using sun-weighted loss from NOW
             const shade       = SHADE[config.shade]?.factor ?? 1.0;
             const debrisMult  = meas.length > 0 ? organicMult(meas[meas.length-1].pollen ?? 'none', meas[meas.length-1].debris ?? 'none') : 1.0;
@@ -896,7 +944,7 @@ export default function PoolApp() {
             );
           })()}
 
-          {pred && !pred.depleted && needed <= 0.05 && (() => {
+          {pred && !pred.depleted && pred.staleness !== 'lockout' && needed <= 0.05 && (() => {
             const shade       = SHADE[config.shade]?.factor ?? 1.0;
             const debrisMult  = meas.length > 0 ? organicMult(meas[meas.length-1].pollen ?? 'none', meas[meas.length-1].debris ?? 'none') : 1.0;
             const params      = { uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade, cya: config.cya, multiplier: model.multiplier * debrisMult };
@@ -1447,6 +1495,20 @@ export default function PoolApp() {
           </Card>
 
           <Btn ghost style={{ width: "100%", marginBottom: "10px" }} onClick={() => { setStep(0); setScreen("setup"); }}>Reconfigure Pool →</Btn>
+          <Card>
+            <Cap>DISPLAY</Cap>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div>
+                <div style={{ fontSize: "13px" }}>{lightMode ? "Light Mode" : "Dark Mode"}</div>
+                <div style={{ fontSize: "10px", color: C.muted, marginTop: "2px" }}>Toggle app color theme</div>
+              </div>
+              <div onClick={() => { const next = !lightMode; setLightMode(next); store.set("light-mode", next); }}
+                style={{ width: "44px", height: "24px", borderRadius: "12px", background: lightMode ? C.accent : C.border, cursor: "pointer", position: "relative", transition: "background 0.2s", flexShrink: 0 }}>
+                <div style={{ position: "absolute", top: "3px", left: lightMode ? "23px" : "3px", width: "18px", height: "18px", borderRadius: "50%", background: C.panel, transition: "left 0.2s", boxShadow: "0 1px 3px rgba(0,0,0,0.3)" }} />
+              </div>
+            </div>
+          </Card>
+
           <Btn ghost style={{ width: "100%", marginBottom: "10px" }} onClick={resetModel}>Reset Decay Model</Btn>
           <Btn ghost style={{ width: "100%", color: C.danger, borderColor: `${C.danger}55` }} onClick={clearAll}>Clear All Data</Btn>
           <div style={{ marginTop: "16px", fontSize: "10px", color: C.muted, lineHeight: 1.8 }}>
