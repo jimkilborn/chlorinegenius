@@ -893,6 +893,8 @@ export default function PoolApp() {
             const params      = { uvIndex: weather?.uvIndex ?? 5, tempF: effectiveTempF(), shadeFactor: shade, cya: config.cya, multiplier: model.multiplier * debrisMult };
             const now24       = new Date(Date.now() + 24 * 3600000);
             const now36       = new Date(Date.now() + 36 * 3600000);
+            const loss24      = sunWeightedLoss(new Date(), now24, params);
+            const loss36      = sunWeightedLoss(new Date(), now36, params);
 
             const fc24h       = Math.max(0, round05(maxFC - loss24));
             const fc36h       = Math.max(0, round05(maxFC - loss36));
